@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orchestrai"
+version = "0.1.0"
+description = "MCP-native multi-model orchestration server for software engineering"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "OrchestrAI Contributors" }]
+keywords = ["mcp", "ai", "orchestration", "multi-agent", "llm", "coding"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    # MCP
+    "mcp>=1.3.0",
+    # Async HTTP
+    "httpx>=0.27.0",
+    "aiohttp>=3.9.0",
+    # Pydantic (schemas + settings)
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    # Provider SDKs
+    "anthropic>=0.30.0",
+    "openai>=1.35.0",
+    "google-generativeai>=0.7.0",
+    # Config
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    # Observability
+    "structlog>=24.2.0",
+    "rich>=13.7.0",
+    # Utilities
+    "tenacity>=8.3.0",
+    "anyio>=4.4.0",
+    "click>=8.1.0",
+    "ulid-py>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "respx>=0.21.0",         # HTTP mocking
+    "pytest-mock>=3.14.0",
+]
+
+[project.scripts]
+orchestrai = "orchestrai.server.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orchestrai"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=orchestrai --cov-report=term-missing -q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

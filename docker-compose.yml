@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  orchestrai:
+    build: .
+    stdin_open: true
+    tty: true
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ORCHESTRAI__ORCHESTRATOR__TIMEOUT_BUDGET_SEC=${TIMEOUT:-300}
+      - ORCHESTRAI__OBSERVABILITY__LOG_FORMAT=${LOG_FORMAT:-json}
+    volumes:
+      - orchestrai-traces:/tmp/orchestrai/traces
+      - orchestrai-artifacts:/tmp/orchestrai/artifacts
+      # Mount local repo for analysis (optional)
+      # - /path/to/your/repo:/workspace:ro
+
+  # Optional: local Ollama for SECRET-tier tasks
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  orchestrai-traces:
+  orchestrai-artifacts:
+  ollama-models:

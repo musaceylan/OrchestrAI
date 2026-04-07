@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+*.whl
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.pyright/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OrchestrAI runtime
+.orchestrai/
+/tmp/orchestrai/
+
+# Secrets
+*.pem
+*.key
+secrets/
+config/local.yaml
+config/prod.yaml
