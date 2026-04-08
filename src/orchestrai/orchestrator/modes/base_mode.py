@@ -19,6 +19,49 @@ from orchestrai.registry.registry import CapabilityRegistry
 
 log = structlog.get_logger()
 
+def _extract_json(text: str) -> dict | None:
+    """
+    Extract the first syntactically complete JSON object from model output.
+
+    Unlike a greedy regex (which grabs first-{ to last-}), this walks the
+    string character-by-character tracking brace depth, stopping exactly when
+    the outermost object closes. That handles:
+      - explanatory text before the JSON block
+      - trailing commentary after the closing brace
+      - nested objects / arrays inside the JSON
+    """
+    import json
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 # System prompts tuned per role
 ROLE_SYSTEM_PROMPTS: dict[RoleType, str] = {
     RoleType.PLANNER: (
@@ -159,9 +202,18 @@ class BaseMode(ABC):
             )
             return "", subtask
 
-        messages = [{"role": "user", "content": user_prompt}]
-        if extra_context:
-            messages.insert(0, {"role": "user", "content": f"Context:\n{extra_context}"})
+        # Merge extra_context into a single user message to avoid consecutive
+        # user turn errors (OpenAI rejects [user, user] message sequences).
+        full_prompt = (
+            f"<context>\n{extra_context}\n</context>\n\n{user_prompt}"
+            if extra_context
+            else user_prompt
+        )
+        messages = [{"role": "user", "content": full_prompt}]
+
+        # Respect the model's published output limit; fall back to 4096.
+        cap = self._registry.get_capability(provider_name, model_id)
+        max_tokens = min(cap.max_output_tokens, 8192) if cap else 4096
 
         start = time.time()
         try:
@@ -169,7 +221,7 @@ class BaseMode(ABC):
                 messages=messages,
                 system=system,
                 model=model_id,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=0.2,
                 role=role,
                 task_id=task.id,
@@ -208,19 +260,13 @@ class BaseMode(ABC):
 
     def _parse_review(self, text: str) -> tuple[str, list[str], list[str]]:
         """Parse a model's JSON review response into (verdict, concerns, praise)."""
-        import json
-        import re
-        try:
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                return (
-                    data.get("overall_verdict", "needs_discussion"),
-                    data.get("key_concerns", []),
-                    data.get("praise", []),
-                )
-        except Exception:
-            pass
+        data = _extract_json(text)
+        if data:
+            return (
+                data.get("overall_verdict", "needs_discussion"),
+                data.get("key_concerns", []),
+                data.get("praise", []),
+            )
         verdict = "approve" if "looks good" in text.lower() else "needs_discussion"
         return verdict, [], []
 

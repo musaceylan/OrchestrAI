@@ -80,9 +80,11 @@ class GeminiProvider(BaseProvider):
             log.info("gemini.probe", available=False, reason="no api key")
             return False
         try:
+            import asyncio
             import google.generativeai as genai
             genai.configure(api_key=self._cfg.api_key)
-            list(genai.list_models())
+            # list_models() is synchronous — run in thread to avoid blocking the event loop
+            await asyncio.to_thread(list, genai.list_models())
             log.info("gemini.probe", available=True)
             return True
         except Exception as e:

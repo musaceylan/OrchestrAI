@@ -136,12 +136,16 @@ class OpenAIProvider(BaseProvider):
         messages.extend(request.messages)
 
         try:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-            )
+            # Reasoning models (o-series) do not accept temperature parameter
+            _is_reasoning = model.startswith("o") and model[1:2].isdigit()
+            create_kwargs: dict = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": request.max_tokens,
+            }
+            if not _is_reasoning:
+                create_kwargs["temperature"] = request.temperature
+            resp = await client.chat.completions.create(**create_kwargs)
             content = resp.choices[0].message.content or ""
             usage = resp.usage
             return CompletionResponse(

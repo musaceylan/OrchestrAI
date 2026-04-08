@@ -12,7 +12,6 @@ Flow:
 from __future__ import annotations
 
 import asyncio
-import json
 
 import structlog
 
@@ -22,7 +21,7 @@ from orchestrai.artifacts.schemas import (
 )
 from orchestrai.execution.shell import run_lint, run_tests
 from orchestrai.observability.trace import make_artifact_id
-from orchestrai.orchestrator.modes.base_mode import BaseMode
+from orchestrai.orchestrator.modes.base_mode import BaseMode, _extract_json
 
 log = structlog.get_logger()
 
@@ -272,12 +271,7 @@ class PlannerCoderReviewerMode(BaseMode):
         return task
 
     def _parse_plan_steps(self, text: str) -> list[dict]:
-        try:
-            import re
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                return data.get("steps", [])
-        except Exception:
-            pass
+        data = _extract_json(text)
+        if data:
+            return data.get("steps", [])
         return [{"step": line.strip()} for line in text.split("\n") if line.strip()]

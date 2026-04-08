@@ -5,8 +5,6 @@ an independent model to evaluate competing implementations.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 import structlog
@@ -15,7 +13,7 @@ from orchestrai.artifacts.schemas import (
     ArtifactKind, CodePatch, JudgeVerdict, OrchestratedTask, Provenance, RoleType,
 )
 from orchestrai.observability.trace import make_artifact_id
-from orchestrai.orchestrator.modes.base_mode import ROLE_SYSTEM_PROMPTS
+from orchestrai.orchestrator.modes.base_mode import ROLE_SYSTEM_PROMPTS, _extract_json
 from orchestrai.providers.base import CompletionRequest
 from orchestrai.registry.registry import CapabilityRegistry
 
@@ -106,10 +104,9 @@ def _parse_judge_response(
     candidates: list[CodePatch],
     content: str,
 ) -> JudgeVerdict:
-    try:
-        json_match = re.search(r"\{.*\}", content, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
+    data = _extract_json(content)
+    if data:
+        try:
             winner_idx = int(data.get("winner_index", 0))
             winner_idx = max(0, min(winner_idx, len(candidates) - 1))
             winner = candidates[winner_idx]
@@ -130,8 +127,8 @@ def _parse_judge_response(
                 alternatives_rejected=rejected,
                 confidence=scores.get(str(winner_idx), 0.8),
             )
-    except Exception as e:
-        log.warning("judge.parse_failed", error=str(e))
+        except Exception as e:
+            log.warning("judge.parse_failed", error=str(e))
     return _heuristic_judge(task, candidates)
 
 
