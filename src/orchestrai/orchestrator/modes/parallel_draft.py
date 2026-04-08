@@ -30,13 +30,7 @@ class ParallelDraftMode(BaseMode):
             return task
 
         brief = task.brief
-        base_prompt = (
-            f"Task: {brief.description}\n"
-            f"Task type: {brief.task_type.value}\n"
-            f"Repo: {brief.repo_root or 'unspecified'}\n"
-            f"Target files: {', '.join(brief.target_files) or 'none specified'}\n"
-            f"Context: {chr(10).join(brief.context_snippets)}"
-        )
+        base_prompt = self._build_base_context(brief)
 
         # Run all CODER assignments in parallel
         coder_assignments = self._find_all_assignments(routing, RoleType.CODER)
@@ -61,10 +55,14 @@ class ParallelDraftMode(BaseMode):
             task_id=task.id,
             count=len(coder_tasks),
         )
-        coder_results = await asyncio.gather(*coder_tasks, return_exceptions=False)
+        coder_results = await asyncio.gather(*coder_tasks, return_exceptions=True)
 
         patches = []
-        for i, (content, subtask) in enumerate(coder_results):
+        for i, result in enumerate(coder_results):
+            if isinstance(result, Exception):
+                log.error("parallel_draft.coder_failed", task_id=task.id, index=i, error=str(result))
+                continue
+            content, subtask = result
             if content:
                 prov = Provenance(
                     task_id=task.id,
@@ -102,6 +100,7 @@ class ParallelDraftMode(BaseMode):
             )
             if review_content:
                 from orchestrai.artifacts.schemas import ReviewComments
+                verdict, concerns, praise = self._parse_review(review_content)
                 review = ReviewComments(
                     id=make_artifact_id(),
                     kind=ArtifactKind.REVIEW_COMMENTS,
@@ -112,8 +111,9 @@ class ParallelDraftMode(BaseMode):
                         model=review_subtask.model,
                         role=RoleType.REVIEWER,
                     ),
-                    overall_verdict="request_changes" if len(patches) == 1 else "approve",
-                    key_concerns=[],
+                    overall_verdict=verdict,
+                    key_concerns=concerns,
+                    praise=praise,
                 )
                 art_id = self._store.put(review)
                 review_subtask.output_artifact_id = art_id
@@ -139,9 +139,7 @@ class ParallelDraftMode(BaseMode):
             alternatives=alternatives,
             review=review,
         )
-        final_id = self._store.put(final)
-        task.final = final
-        task.status = "done"
+        self._finalize(task, final)
 
         log.info(
             "parallel_draft.complete",

@@ -41,13 +41,7 @@ class PlannerCoderReviewerMode(BaseMode):
             task.error = "No routing decision"
             return task
 
-        base_context = (
-            f"Task: {brief.description}\n"
-            f"Task type: {brief.task_type.value}\n"
-            f"Repo: {brief.repo_root or 'unspecified'}\n"
-            f"Target files: {', '.join(brief.target_files) or 'none'}\n"
-            f"Context: {chr(10).join(brief.context_snippets)}"
-        )
+        base_context = self._build_base_context(brief)
 
         # ── Step 1: PLAN ──────────────────────────────────────────────────────
         plan_assignment = self._find_assignment(routing, RoleType.PLANNER)
@@ -272,9 +266,7 @@ class PlannerCoderReviewerMode(BaseMode):
             confidence=confidence,
             review=review,
         )
-        self._store.put(final)
-        task.final = final
-        task.status = "done"
+        self._finalize(task, final)
 
         log.info("pcr.complete", task_id=task.id, confidence=confidence)
         return task
@@ -289,19 +281,3 @@ class PlannerCoderReviewerMode(BaseMode):
         except Exception:
             pass
         return [{"step": line.strip()} for line in text.split("\n") if line.strip()]
-
-    def _parse_review(self, text: str) -> tuple[str, list[str], list[str]]:
-        try:
-            import re
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                return (
-                    data.get("overall_verdict", "needs_discussion"),
-                    data.get("key_concerns", []),
-                    data.get("praise", []),
-                )
-        except Exception:
-            pass
-        verdict = "approve" if "looks good" in text.lower() else "needs_discussion"
-        return verdict, [], []

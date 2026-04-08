@@ -349,6 +349,7 @@ async def _inspect_artifacts(
     from orchestrai.artifacts.store import ArtifactStore
     from orchestrai.artifacts.schemas import ArtifactKind
     task_id = args["task_id"]
+    _validate_id(task_id)
     store = ArtifactStore(task_id)
     kind_filter = args.get("kind")
     if kind_filter:
@@ -411,23 +412,33 @@ async def _compare_candidates(
     registry: "CapabilityRegistry | None",
 ) -> dict[str, Any]:
     from orchestrai.artifacts.store import ArtifactStore
-    from orchestrai.artifacts.schemas import ArtifactKind, OrchestratedTask
+    from orchestrai.artifacts.schemas import ArtifactKind, CodePatch
     task_id = args["task_id"]
+    _validate_id(task_id)
     store = ArtifactStore(task_id)
-    patches = store.list_by_kind(ArtifactKind.CODE_PATCH)
-    if not patches:
+    raw_patches = store.list_by_kind(ArtifactKind.CODE_PATCH)
+    if not raw_patches:
         return {"error": f"No code patches found for task {task_id}"}
 
-    # Build a minimal task proxy
-    active = orchestrator._active.get(task_id)
-    if not active:
-        return {"error": f"Task {task_id} not in active tasks. Already completed?"}
+    # Deserialize raw dicts → typed CodePatch objects for run_judge
+    patches: list[CodePatch] = []
+    for raw in raw_patches:
+        try:
+            patches.append(CodePatch.model_validate(raw))
+        except Exception as e:
+            log.warning("compare_candidates.deserialize_error", error=str(e))
+    if not patches:
+        return {"error": "Could not deserialize any code patches"}
+
+    task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
+    if not task:
+        return {"error": f"Task {task_id} not found"}
 
     if registry is None:
         return {"error": "Registry not initialized"}
 
     verdict = await run_judge(
-        task=active,
+        task=task,
         candidates=patches,
         registry=registry,
         judge_model_override=args.get("judge_model"),

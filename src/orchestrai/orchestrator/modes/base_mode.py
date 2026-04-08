@@ -9,7 +9,7 @@ from typing import Any
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    ArtifactKind, CodePatch, CompletionRequest as _CompReq, OrchestratedTask,
+    ArtifactKind, CodePatch, CompletionRequest as _CompReq, FinalDecision, OrchestratedTask,
     Provenance, ReviewComments, RoutingDecision, RoleType, SubTask, TestCandidate,
 )
 from orchestrai.artifacts.store import ArtifactStore
@@ -87,6 +87,26 @@ class BaseMode(ABC):
         self._registry = registry
         self._store = store
         self._tracer = tracer
+
+    def _build_base_context(self, brief: Any) -> str:
+        """Standard context block shared across all modes."""
+        return (
+            f"Task: {brief.description}\n"
+            f"Task type: {brief.task_type.value}\n"
+            f"Repo: {brief.repo_root or 'unspecified'}\n"
+            f"Target files: {', '.join(brief.target_files) or 'none'}\n"
+            f"Context: {chr(10).join(brief.context_snippets)}"
+        )
+
+    def _finalize(
+        self,
+        task: "OrchestratedTask",
+        final: "FinalDecision",
+    ) -> None:
+        """Store the final artifact and mark task done."""
+        self._store.put(final)
+        task.final = final
+        task.status = "done"
 
     @property
     @abstractmethod
@@ -185,6 +205,24 @@ class BaseMode(ABC):
                 error=str(e),
             )
             return "", subtask
+
+    def _parse_review(self, text: str) -> tuple[str, list[str], list[str]]:
+        """Parse a model's JSON review response into (verdict, concerns, praise)."""
+        import json
+        import re
+        try:
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                return (
+                    data.get("overall_verdict", "needs_discussion"),
+                    data.get("key_concerns", []),
+                    data.get("praise", []),
+                )
+        except Exception:
+            pass
+        verdict = "approve" if "looks good" in text.lower() else "needs_discussion"
+        return verdict, [], []
 
     def _find_assignment(
         self, routing: RoutingDecision, role: RoleType

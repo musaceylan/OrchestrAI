@@ -70,12 +70,16 @@ class Orchestrator:
         )
         store.put(brief)
 
-        # Scan repo for context
+        # Scan repo for context and propagate detected framework into brief metadata
         if repo_root:
             repo_summary = scan_repo(repo_root)
             repo_summary.provenance.task_id = task_id
             store.put(repo_summary)
             brief.context_snippets.append(f"Repo: {repo_summary.summary_text}")
+            if repo_summary.test_framework:
+                brief.metadata["test_framework"] = repo_summary.test_framework
+            if repo_summary.language:
+                brief.metadata["language"] = repo_summary.language
 
         # Resolve mode
         if mode is None:

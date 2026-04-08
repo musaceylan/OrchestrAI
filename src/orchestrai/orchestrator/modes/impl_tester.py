@@ -38,13 +38,7 @@ class ImplTesterMode(BaseMode):
             task.error = "No routing decision"
             return task
 
-        base = (
-            f"Task: {brief.description}\n"
-            f"Type: {brief.task_type.value}\n"
-            f"Repo: {brief.repo_root or 'unspecified'}\n"
-            f"Files: {', '.join(brief.target_files) or 'none'}\n"
-            f"Context: {chr(10).join(brief.context_snippets)}"
-        )
+        base = self._build_base_context(brief)
 
         # Run CODER and TESTER in parallel
         coder_a = self._find_assignment(routing, RoleType.CODER)
@@ -71,38 +65,49 @@ class ImplTesterMode(BaseMode):
                 )
             )
 
-        results = await asyncio.gather(*parallel)
+        results = await asyncio.gather(*parallel, return_exceptions=True)
 
         patch = None
         test_artifact: TestCandidate | None = None
         idx = 0
         if coder_a and idx < len(results):
-            code_content, code_subtask = results[idx]
+            result = results[idx]
             idx += 1
-            if code_content:
-                prov = Provenance(
-                    task_id=task.id, subtask_id=code_subtask.id,
-                    provider=code_subtask.provider, model=code_subtask.model,
-                    role=RoleType.CODER,
-                )
-                patch = self._make_patch(code_content, prov)
-                self._store.put(patch)
+            if isinstance(result, Exception):
+                log.error("impl_tester.coder_failed", task_id=task.id, error=str(result))
+            else:
+                code_content, code_subtask = result
+                if code_content:
+                    prov = Provenance(
+                        task_id=task.id, subtask_id=code_subtask.id,
+                        provider=code_subtask.provider, model=code_subtask.model,
+                        role=RoleType.CODER,
+                    )
+                    patch = self._make_patch(code_content, prov)
+                    self._store.put(patch)
+
+        # Detect test framework from repo scan stored in brief.metadata
+        detected_framework = brief.metadata.get("test_framework", "pytest")
 
         if tester_a and idx < len(results):
-            test_content, test_subtask = results[idx]
-            if test_content:
-                test_artifact = TestCandidate(
-                    id=make_artifact_id(),
-                    kind=ArtifactKind.TEST_CANDIDATE,
-                    provenance=Provenance(
-                        task_id=task.id, subtask_id=test_subtask.id,
-                        provider=test_subtask.provider, model=test_subtask.model,
-                        role=RoleType.TESTER,
-                    ),
-                    test_code=test_content,
-                    framework="pytest",
-                )
-                self._store.put(test_artifact)
+            result = results[idx]
+            if isinstance(result, Exception):
+                log.error("impl_tester.tester_failed", task_id=task.id, error=str(result))
+            else:
+                test_content, test_subtask = result
+                if test_content:
+                    test_artifact = TestCandidate(
+                        id=make_artifact_id(),
+                        kind=ArtifactKind.TEST_CANDIDATE,
+                        provenance=Provenance(
+                            task_id=task.id, subtask_id=test_subtask.id,
+                            provider=test_subtask.provider, model=test_subtask.model,
+                            role=RoleType.TESTER,
+                        ),
+                        test_code=test_content,
+                        framework=detected_framework,
+                    )
+                    self._store.put(test_artifact)
 
         # Run tests if repo available
         tool_evidence: list[str] = []
@@ -164,7 +169,5 @@ class ImplTesterMode(BaseMode):
             confidence=confidence,
             review=review,
         )
-        self._store.put(final)
-        task.final = final
-        task.status = "done"
+        self._finalize(task, final)
         return task
