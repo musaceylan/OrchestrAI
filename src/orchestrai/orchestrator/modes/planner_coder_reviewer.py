@@ -128,7 +128,7 @@ class PlannerCoderReviewerMode(BaseMode):
             )
 
         log.info("pcr.coder_tester_parallel", task_id=task.id, calls=len(parallel_calls))
-        parallel_results = await asyncio.gather(*parallel_calls, return_exceptions=False)
+        parallel_results = await asyncio.gather(*parallel_calls, return_exceptions=True)
 
         code_content = ""
         test_content = ""
@@ -137,10 +137,18 @@ class PlannerCoderReviewerMode(BaseMode):
 
         idx = 0
         if coder_assignment:
-            code_content, code_subtask = parallel_results[idx]
+            result = parallel_results[idx]
+            if isinstance(result, Exception):
+                log.error("pcr.coder_failed", task_id=task.id, error=str(result))
+            else:
+                code_content, code_subtask = result
             idx += 1
         if tester_assignment:
-            test_content, test_subtask = parallel_results[idx]
+            result = parallel_results[idx]
+            if isinstance(result, Exception):
+                log.error("pcr.tester_failed", task_id=task.id, error=str(result))
+            else:
+                test_content, test_subtask = result
 
         # Build patch artifact
         patch = None

@@ -33,12 +33,16 @@ MODE_MAP = {
 }
 
 
+_MAX_FINISHED = 100  # cap recent-completed cache to avoid unbounded memory growth
+
+
 class Orchestrator:
     def __init__(self, registry: CapabilityRegistry) -> None:
         self._registry = registry
         self._settings = get_settings()
         self._router = RoutingEngine(registry, self._settings.policy)
         self._active: dict[str, OrchestratedTask] = {}
+        self._finished: dict[str, OrchestratedTask] = {}  # recently completed tasks
 
     async def submit(
         self,
@@ -132,6 +136,11 @@ class Orchestrator:
             )
             tracer.save()
             self._active.pop(task_id, None)
+            # Keep in finished cache for inspect tools; evict oldest if over cap
+            self._finished[task_id] = task
+            if len(self._finished) > _MAX_FINISHED:
+                oldest = next(iter(self._finished))
+                del self._finished[oldest]
 
         log.info(
             "orchestrator.complete",

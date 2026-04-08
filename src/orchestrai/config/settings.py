@@ -112,12 +112,17 @@ class Settings(BaseSettings):
     @classmethod
     def load(cls) -> "Settings":
         """Load settings: YAML file if present, then env overrides."""
+        import logging
         yaml_path = Path(os.environ.get("ORCHESTRAI_CONFIG", "config/default.yaml"))
         if yaml_path.exists():
             try:
                 return cls.from_yaml(yaml_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Failed to load config from %s: %s. Falling back to env/defaults.",
+                    yaml_path,
+                    exc,
+                )
         return cls()
 
 

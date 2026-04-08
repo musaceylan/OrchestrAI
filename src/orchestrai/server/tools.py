@@ -190,6 +190,12 @@ def build_tools() -> list[Tool]:
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
+def _validate_id(value: str) -> None:
+    """Reject IDs that could escape their storage directory."""
+    if not value or "/" in value or "\\" in value or ".." in value:
+        raise ValueError(f"Invalid ID: {value!r}")
+
+
 async def handle_tool(
     name: str,
     arguments: dict[str, Any],
@@ -263,16 +269,15 @@ async def _inspect_plan(
     registry: "CapabilityRegistry | None",
 ) -> dict[str, Any]:
     task_id = args["task_id"]
-    # Look in active tasks first, then completed
-    active = orchestrator._active.get(task_id)
-    if active and active.routing:
+    task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
+    if task and task.routing:
         return {
             "task_id": task_id,
-            "mode": active.mode,
-            "routing_rationale": active.routing.rationale,
-            "assignments": active.routing.assignments,
+            "mode": task.mode,
+            "routing_rationale": task.routing.rationale,
+            "assignments": task.routing.assignments,
         }
-    return {"error": f"Task {task_id} not found in active tasks"}
+    return {"error": f"Task {task_id} not found"}
 
 
 async def _inspect_registry(
@@ -313,15 +318,16 @@ async def _inspect_agents(
     registry: "CapabilityRegistry | None",
 ) -> dict[str, Any]:
     task_id = args["task_id"]
-    active = orchestrator._active.get(task_id)
-    if not active:
-        return {"error": f"Task {task_id} not active"}
-    assignments = active.routing.assignments if active.routing else []
+    task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
+    if not task:
+        return {"error": f"Task {task_id} not found"}
+    assignments = task.routing.assignments if task.routing else []
     return {
         "task_id": task_id,
-        "mode": active.mode,
+        "mode": task.mode,
+        "status": task.status,
         "assignments": assignments,
-        "subtask_count": len(active.subtasks),
+        "subtask_count": len(task.subtasks),
         "subtasks": [
             {
                 "id": s.id,
@@ -330,7 +336,7 @@ async def _inspect_agents(
                 "model": s.model,
                 "status": s.status,
             }
-            for s in active.subtasks
+            for s in task.subtasks
         ],
     }
 
@@ -376,8 +382,15 @@ async def _inspect_trace(
 ) -> dict[str, Any]:
     import json
     from pathlib import Path
+    from orchestrai.config.settings import get_settings
     task_id = args["task_id"]
-    trace_path = Path(f"/tmp/orchestrai/traces/{task_id}.jsonl")
+    _validate_id(task_id)
+    settings = get_settings()
+    trace_dir = Path(settings.observability.trace_dir)
+    trace_path = trace_dir / f"{task_id}.jsonl"
+    # Prevent path traversal: ensure resolved path stays inside trace_dir
+    if not str(trace_path.resolve()).startswith(str(trace_dir.resolve())):
+        return {"error": "Invalid task_id"}
     if not trace_path.exists():
         return {"error": f"No trace found for task {task_id}"}
     events = []
@@ -444,7 +457,7 @@ async def _rerun_with_policy(
     briefs = store.list_by_kind(ArtifactKind.TASK_BRIEF)
     if not briefs:
         return {"error": f"No task brief found for {task_id}"}
-    brief = briefs[0]
+    brief = briefs[0]  # raw dict from store
 
     # Convert policy overrides to user_preferences format
     user_prefs = {
@@ -456,9 +469,9 @@ async def _rerun_with_policy(
     user_prefs = {k: v for k, v in user_prefs.items() if v}
 
     task = await orchestrator.submit(
-        request=brief.description,
-        repo_root=brief.repo_root,
-        target_files=brief.target_files,
+        request=brief.get("description") or brief.get("raw_request", ""),
+        repo_root=brief.get("repo_root"),
+        target_files=brief.get("target_files"),
         user_preferences=user_prefs or None,
     )
     return {

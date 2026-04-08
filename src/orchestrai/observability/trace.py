@@ -147,7 +147,13 @@ class Tracer:
         )
 
     def save(self) -> Path:
+        # Validate task_id to prevent path traversal
+        if not self.task_id or "/" in self.task_id or "\\" in self.task_id or ".." in self.task_id:
+            raise ValueError(f"Invalid task_id for trace save: {self.task_id!r}")
         path = self._trace_dir / f"{self.task_id}.jsonl"
+        resolved = path.resolve()
+        if not str(resolved).startswith(str(self._trace_dir.resolve())):
+            raise ValueError(f"Path traversal detected for task_id: {self.task_id!r}")
         with open(path, "w") as f:
             for event in self.events:
                 f.write(json.dumps(event) + "\n")

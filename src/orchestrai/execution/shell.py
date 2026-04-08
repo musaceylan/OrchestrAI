@@ -5,6 +5,7 @@ All execution is sandboxed with timeouts and output capture.
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import time
 from pathlib import Path
@@ -37,6 +38,9 @@ async def run_command(
         cmd_list = cmd
         cmd_str = " ".join(cmd)
 
+    # Merge caller-supplied env with current environment so subprocess has PATH etc.
+    merged_env = {**os.environ, **(env or {})}
+
     start = time.time()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -44,7 +48,7 @@ async def run_command(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
-            env=env,
+            env=merged_env,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -223,18 +227,23 @@ def _build_test_command(framework: str, test_path: str | None) -> str:
     return framework
 
 
-def _detect_lint_command(cwd: str, files: list[str] | None) -> tuple[str, str]:
+def _detect_lint_command(cwd: str, files: list[str] | None) -> tuple[str, list[str]]:
     root = Path(cwd)
-    files_str = " ".join(files) if files else "."
+    # Use list form to avoid argument injection — never join into a shell string
+    file_args: list[str] = files if files else ["."]
+    # Reject any file arg that looks like a flag to prevent option injection
+    safe_file_args = [f for f in file_args if not f.startswith("-")]
+    if not safe_file_args:
+        safe_file_args = ["."]
     if (root / "pyproject.toml").exists() or (root / ".ruff.toml").exists():
-        return "ruff", f"ruff check {files_str}"
+        return "ruff", ["ruff", "check"] + safe_file_args
     if (root / ".eslintrc.json").exists() or (root / ".eslintrc.js").exists():
-        return "eslint", f"npx eslint {files_str}"
+        return "eslint", ["npx", "eslint"] + safe_file_args
     if (root / "Cargo.toml").exists():
-        return "clippy", "cargo clippy -- -D warnings"
+        return "clippy", ["cargo", "clippy", "--", "-D", "warnings"]
     if (root / "go.mod").exists():
-        return "golint", "go vet ./..."
-    return "ruff", f"ruff check {files_str}"
+        return "golint", ["go", "vet", "./..."]
+    return "ruff", ["ruff", "check"] + safe_file_args
 
 
 def _detect_typecheck_command(cwd: str) -> tuple[str, str]:
@@ -250,11 +259,19 @@ def _detect_typecheck_command(cwd: str) -> tuple[str, str]:
 
 def _parse_lint_output(tool: str, raw: str) -> list[dict]:
     """Best-effort parsing of lint output into structured issues."""
+    import re
     issues = []
+    # ruff/flake8: "path.py:10:5: E501 line too long"
+    _ruff_error = re.compile(r":\s+E\d{3,}")
+    # generic "error:" at word boundary (avoid false matches like "noerror")
+    _generic_error = re.compile(r"\berror\b", re.IGNORECASE)
     for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
-        sev = "error" if " E" in line or "error" in line.lower() else "warning"
+        if _ruff_error.search(line) or _generic_error.search(line):
+            sev = "error"
+        else:
+            sev = "warning"
         issues.append({"text": line, "severity": sev})
     return issues

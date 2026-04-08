@@ -18,6 +18,16 @@ from orchestrai.observability.trace import make_artifact_id
 log = structlog.get_logger()
 
 
+def _safe_subpath(base: Path, segment: str) -> Path:
+    """Return base/segment, raising ValueError if the result escapes base."""
+    if not segment or "/" in segment or "\\" in segment or ".." in segment:
+        raise ValueError(f"Invalid path segment: {segment!r}")
+    result = (base / segment).resolve()
+    if not str(result).startswith(str(base.resolve())):
+        raise ValueError(f"Path traversal detected for segment: {segment!r}")
+    return result
+
+
 class ArtifactStore:
     """
     Thread-safe (asyncio) artifact store.
@@ -28,7 +38,9 @@ class ArtifactStore:
         self._task_id = task_id
         self._store: dict[str, dict[str, Any]] = {}
         settings = get_settings()
-        self._artifact_dir = Path(settings.observability.artifact_dir) / task_id
+        base = Path(settings.observability.artifact_dir)
+        base.mkdir(parents=True, exist_ok=True)
+        self._artifact_dir = _safe_subpath(base, task_id)
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
 
     def put(self, artifact: Artifact) -> str:
