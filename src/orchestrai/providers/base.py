@@ -18,13 +18,32 @@ from orchestrai.artifacts.schemas import (
 
 @dataclass
 class ModelCapability:
-    """Declarative capability descriptor for a model."""
-    provider: str
-    provider_kind: ProviderKind
-    model_id: str
-    display_name: str
+    """
+    Declarative capability descriptor for a model.
 
-    # Role suitability (0.0–1.0)
+    Strengths can be supplied two ways — they are equivalent:
+    1. Via the per-role ``role_strengths`` dict (e.g. from test fixtures or
+       providers that declare sparse strength profiles).
+    2. Via the individual ``*_strength`` float fields (used by provider
+       implementations that enumerate all roles explicitly).
+
+    ``__post_init__`` reconciles both styles: if ``role_strengths`` is non-empty
+    it takes precedence; otherwise the individual fields populate it.
+    ``strength_for_role()`` always reads from the unified dict.
+    """
+    # ── Required identity fields ──────────────────────────────────────────────
+    provider: str
+    model_id: str
+
+    # Optional fields with sensible defaults so test fixtures can omit them
+    provider_kind: ProviderKind = ProviderKind.UNKNOWN
+    display_name: str = ""
+
+    # ── Per-role strength dict (populated by __post_init__ if empty) ──────────
+    # Accepts a sparse dict — roles not listed default to 0.5.
+    role_strengths: dict[RoleType, float] = field(default_factory=dict)
+
+    # ── Individual strength overrides (used when role_strengths is empty) ─────
     planning_strength: float = 0.5
     coding_strength: float = 0.5
     debugging_strength: float = 0.5
@@ -33,39 +52,43 @@ class ModelCapability:
     docs_strength: float = 0.5
     long_context_strength: float = 0.5
 
-    # Operational properties
+    # ── Operational properties ────────────────────────────────────────────────
     context_window: int = 8192
     max_output_tokens: int = 4096
     latency_tier: LatencyTier = LatencyTier.MEDIUM
     cost_tier: CostTier = CostTier.MEDIUM
     privacy_level: PrivacyLevel = PrivacyLevel.PUBLIC
 
-    # Feature flags
+    # ── Feature flags ─────────────────────────────────────────────────────────
     supports_tool_calling: bool = False
     supports_structured_output: bool = False
     supports_streaming: bool = True
 
-    # Runtime state
+    # ── Runtime state ─────────────────────────────────────────────────────────
     available: bool = True
     error_message: str | None = None
 
     # Role routing: which roles is this model best for
     preferred_roles: list[RoleType] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if not self.role_strengths:
+            # Build from the individual strength fields (all roles covered)
+            self.role_strengths = {
+                RoleType.PLANNER:    self.planning_strength,
+                RoleType.CODER:      self.coding_strength,
+                RoleType.DEBUGGER:   self.debugging_strength,
+                RoleType.REVIEWER:   self.review_strength,
+                RoleType.TESTER:     self.test_gen_strength,
+                RoleType.DOCUMENTER: self.docs_strength,
+                RoleType.ANALYZER:   (self.debugging_strength + self.long_context_strength) / 2,
+                RoleType.JUDGE:      (self.review_strength + self.planning_strength) / 2,
+                RoleType.REFACTOR:   (self.coding_strength + self.review_strength) / 2,
+                RoleType.RESEARCHER: (self.long_context_strength + self.planning_strength) / 2,
+            }
+
     def strength_for_role(self, role: RoleType) -> float:
-        mapping = {
-            RoleType.PLANNER: self.planning_strength,
-            RoleType.CODER: self.coding_strength,
-            RoleType.DEBUGGER: self.debugging_strength,
-            RoleType.REVIEWER: self.review_strength,
-            RoleType.TESTER: self.test_gen_strength,
-            RoleType.DOCUMENTER: self.docs_strength,
-            RoleType.ANALYZER: (self.debugging_strength + self.long_context_strength) / 2,
-            RoleType.JUDGE: (self.review_strength + self.planning_strength) / 2,
-            RoleType.REFACTOR: (self.coding_strength + self.review_strength) / 2,
-            RoleType.RESEARCHER: (self.long_context_strength + self.planning_strength) / 2,
-        }
-        return mapping.get(role, 0.5)
+        return self.role_strengths.get(role, 0.5)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,15 +106,7 @@ class ModelCapability:
             "supports_streaming": self.supports_streaming,
             "available": self.available,
             "error_message": self.error_message,
-            "strengths": {
-                "planning": self.planning_strength,
-                "coding": self.coding_strength,
-                "debugging": self.debugging_strength,
-                "review": self.review_strength,
-                "test_gen": self.test_gen_strength,
-                "docs": self.docs_strength,
-                "long_context": self.long_context_strength,
-            },
+            "strengths": {r.value: round(s, 4) for r, s in self.role_strengths.items()},
             "preferred_roles": [r.value for r in self.preferred_roles],
         }
 

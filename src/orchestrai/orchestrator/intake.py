@@ -34,7 +34,7 @@ _REFACTOR_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_KEYWORDS = re.compile(
-    r"\b(review|critique|analyse|analyze|assess|check|evaluate|audit|"
+    r"\b(review|critique|assess|check|evaluate|audit|"
     r"look at|what do you think|feedback)\b",
     re.IGNORECASE,
 )
@@ -44,8 +44,13 @@ _TEST_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 _DOCS_KEYWORDS = re.compile(
-    r"\b(doc|docs|documentation|readme|comment|docstring|explain|describe|"
+    r"\b(document|doc|docs|documentation|readme|comment|docstring|explain|describe|"
     r"changelog|api doc|openapi)\b",
+    re.IGNORECASE,
+)
+_RESEARCH_KEYWORDS = re.compile(
+    r"\b(analyse|analyze|investigate|profile|benchmark|bottleneck|performance|"
+    r"research|explore|study|understand|diagnose|why is|how does)\b",
     re.IGNORECASE,
 )
 
@@ -66,6 +71,8 @@ def classify_task(request: str) -> TaskType:
         scores[TaskType.TEST_GENERATION] += 3
     if _DOCS_KEYWORDS.search(request):
         scores[TaskType.DOCS] += 3
+    if _RESEARCH_KEYWORDS.search(request):
+        scores[TaskType.RESEARCH] += 3
 
     best = max(scores, key=lambda t: scores[t])
     if scores[best] == 0:

@@ -11,11 +11,13 @@ from orchestrai.providers.base import ModelCapability
 
 
 def _cap(model_id: str, cost: CostTier, privacy: PrivacyLevel) -> ModelCapability:
+    from orchestrai.artifacts.schemas import ProviderKind
     return ModelCapability(
         model_id=model_id,
         provider="test",
+        provider_kind=ProviderKind.UNKNOWN,
+        display_name=model_id,
         context_window=128_000,
-        role_strengths={},
         cost_tier=cost,
         latency_tier=LatencyTier.MEDIUM,
         privacy_level=privacy,

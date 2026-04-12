@@ -7,7 +7,7 @@ from orchestrai.artifacts.schemas import TaskType
 from orchestrai.orchestrator.intake import classify_task, build_task_brief
 
 
-@pytest.mark.parametrize("request,expected", [
+@pytest.mark.parametrize("task_request,expected", [
     ("Fix the NullPointerException in auth.py", TaskType.BUGFIX),
     ("Add pagination to the users API endpoint", TaskType.FEATURE),
     ("Refactor the database layer to use repository pattern", TaskType.REFACTOR),
@@ -16,9 +16,9 @@ from orchestrai.orchestrator.intake import classify_task, build_task_brief
     ("Document the public API surface", TaskType.DOCS),
     ("Analyse performance bottlenecks in the query pipeline", TaskType.RESEARCH),
 ])
-def test_classify_task(request, expected):
-    result = classify_task(request)
-    assert result == expected, f"Expected {expected} for '{request}', got {result}"
+def test_classify_task(task_request, expected):
+    result = classify_task(task_request)
+    assert result == expected, f"Expected {expected} for '{task_request}', got {result}"
 
 
 def test_build_task_brief_basic():
@@ -26,7 +26,7 @@ def test_build_task_brief_basic():
         request="Fix the login bug",
         task_id="task-123",
     )
-    assert brief.id == "task-123"
+    assert brief.provenance.task_id == "task-123"
     assert brief.description == "Fix the login bug"
     assert brief.task_type == TaskType.BUGFIX
     assert brief.repo_root is None

@@ -101,10 +101,19 @@ class OpenAIProvider(BaseProvider):
     def _get_client(self) -> "openai.AsyncOpenAI":
         if self._client is None:
             import openai
+            import httpx
             self._client = openai.AsyncOpenAI(
                 api_key=self._cfg.api_key,
                 base_url=self._cfg.base_url,
                 timeout=self._cfg.timeout,
+                http_client=httpx.AsyncClient(
+                    limits=httpx.Limits(
+                        max_keepalive_connections=10,
+                        max_connections=100,
+                        keepalive_expiry=30.0,
+                    ),
+                    timeout=httpx.Timeout(self._cfg.timeout),
+                ),
             )
         return self._client
 

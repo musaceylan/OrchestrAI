@@ -102,7 +102,16 @@ class AnthropicProvider(BaseProvider):
     def _get_client(self) -> "anthropic.AsyncAnthropic":
         if self._client is None:
             import anthropic
-            kwargs: dict = {"api_key": self._cfg.api_key}
+            import httpx
+            http_client = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,
+                    max_connections=100,
+                    keepalive_expiry=30.0,
+                ),
+                timeout=httpx.Timeout(self._cfg.timeout),
+            )
+            kwargs: dict = {"api_key": self._cfg.api_key, "http_client": http_client}
             if self._cfg.base_url:
                 kwargs["base_url"] = self._cfg.base_url
             self._client = anthropic.AsyncAnthropic(**kwargs)

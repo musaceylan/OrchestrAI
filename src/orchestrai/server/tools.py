@@ -3,10 +3,13 @@ MCP Tool definitions and dispatch for OrchestrAI.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
 from mcp.types import Tool
+
+from orchestrai.observability.metrics import tool_calls_total
 
 from orchestrai.orchestrator.judge import run_judge
 from orchestrai.orchestrator.orchestrator import Orchestrator
@@ -23,7 +26,8 @@ def build_tools() -> list[Tool]:
             description=(
                 "Submit a software engineering task for orchestrated multi-model execution. "
                 "Automatically routes to the best combination of models for planning, coding, "
-                "testing, and review."
+                "testing, and review. "
+                "Set wait=false to fire-and-forget and poll with get_task_status."
             ),
             inputSchema={
                 "type": "object",
@@ -49,6 +53,14 @@ def build_tools() -> list[Tool]:
                     "user_preferences": {
                         "type": "object",
                         "description": "Override routing: {preferred_providers: [...], privacy_level: ..., cost_tier: ...}",
+                    },
+                    "wait": {
+                        "type": "boolean",
+                        "description": (
+                            "If true (default), block until the task completes and return the full result. "
+                            "If false, return immediately with task_id and status='running'; "
+                            "use get_task_status to poll for completion."
+                        ),
                     },
                 },
                 "required": ["request"],
@@ -101,7 +113,7 @@ def build_tools() -> list[Tool]:
                         "type": "string",
                         "enum": ["task_brief", "code_patch", "test_candidate", "review_comments",
                                  "judge_verdict", "final_decision", "implementation_plan",
-                                 "tool_result", "repo_summary", "routing_decision"],
+                                 "repo_summary", "routing_decision"],
                         "description": "Filter by artifact kind (optional)",
                     },
                 },
@@ -171,6 +183,47 @@ def build_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="list_tasks",
+            description=(
+                "List active (running) tasks and recently finished tasks. "
+                "Useful for monitoring background submissions made with wait=false."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of recently finished tasks to include (default: 20)",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_task_status",
+            description=(
+                "Get the current status of a task submitted with wait=false. "
+                "Returns status='running' if still in progress, or the full result once done."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID from submit_task"},
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="cancel_task",
+            description="Cancel a running background task submitted with wait=false.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID to cancel"},
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
             name="get_task_result",
             description="Get the final result of a completed task including the winning patch and verdict.",
             inputSchema={
@@ -213,15 +266,40 @@ async def handle_tool(
         "rerun_with_policy": _rerun_with_policy,
         "list_available_models": _list_available_models,
         "probe_providers": _probe_providers,
+        "list_tasks": _list_tasks,
+        "get_task_status": _get_task_status,
+        "cancel_task": _cancel_task,
         "get_task_result": _get_task_result,
     }
     handler = handlers.get(name)
     if handler is None:
+        log.info("audit.tool_call", tool=name, outcome="unknown_tool",
+                 args_keys=sorted(arguments.keys()), duration_ms=0.0)
         return {"error": f"Unknown tool: {name}"}
+    _t0 = time.time()
     try:
-        return await handler(arguments, orchestrator, registry)
+        result = await handler(arguments, orchestrator, registry)
+        _outcome = "error" if isinstance(result, dict) and "error" in result else "success"
+        log.info(
+            "audit.tool_call",
+            tool=name,
+            args_keys=sorted(arguments.keys()),
+            outcome=_outcome,
+            duration_ms=round((time.time() - _t0) * 1000, 2),
+        )
+        tool_calls_total.labels(tool=name, outcome=_outcome).inc()
+        return result
     except Exception as e:
         log.exception("tool.error", tool=name, error=str(e))
+        log.info(
+            "audit.tool_call",
+            tool=name,
+            args_keys=sorted(arguments.keys()),
+            outcome="exception",
+            error=str(e),
+            duration_ms=round((time.time() - _t0) * 1000, 2),
+        )
+        tool_calls_total.labels(tool=name, outcome="exception").inc()
         return {"error": str(e), "tool": name}
 
 
@@ -230,12 +308,14 @@ async def _submit_task(
     orchestrator: Orchestrator,
     registry: "CapabilityRegistry | None",
 ) -> dict[str, Any]:
+    wait = args.get("wait", True)
     task = await orchestrator.submit(
         request=args["request"],
         repo_root=args.get("repo_root"),
         target_files=args.get("target_files"),
         mode=args.get("mode"),
         user_preferences=args.get("user_preferences"),
+        wait=wait,
     )
     result: dict[str, Any] = {
         "task_id": task.id,
@@ -517,8 +597,7 @@ async def _list_available_models(
                 "strengths": {r.value: round(s, 2) for r, s in c.role_strengths.items()},
                 "features": {
                     "streaming": c.supports_streaming,
-                    "function_calling": c.supports_function_calling,
-                    "vision": c.supports_vision,
+                    "function_calling": c.supports_tool_calling,
                 },
             }
             for c in caps
@@ -542,6 +621,74 @@ async def _probe_providers(
         "providers_found": len(providers),
         "providers": [p.name for p in providers],
         "total_models": len(new_registry.all_capabilities()),
+    }
+
+
+async def _list_tasks(
+    args: dict[str, Any],
+    orchestrator: Orchestrator,
+    registry: "CapabilityRegistry | None",
+) -> dict[str, Any]:
+    limit = int(args.get("limit", 20))
+    return {
+        "active": orchestrator.get_active_tasks(),
+        "recent_finished": orchestrator.get_recent_tasks(limit=limit),
+    }
+
+
+async def _get_task_status(
+    args: dict[str, Any],
+    orchestrator: Orchestrator,
+    registry: "CapabilityRegistry | None",
+) -> dict[str, Any]:
+    task_id = args["task_id"]
+    _validate_id(task_id)
+    task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
+    if not task:
+        return {"error": f"Task {task_id} not found"}
+
+    result: dict[str, Any] = {
+        "task_id": task_id,
+        "status": task.status,
+        "mode": task.mode,
+        "task_type": task.brief.task_type.value,
+        "subtasks": len(task.subtasks),
+        "cost_usd": task.cost_usd,
+        "tokens_used": task.tokens_used,
+    }
+    if task.error:
+        result["error"] = task.error
+    if task.finished_at:
+        result["finished_at"] = task.finished_at
+    if task.status == "done" and task.final:
+        result["summary"] = task.final.summary
+        result["confidence"] = task.final.confidence
+        if task.final.review:
+            result["review_verdict"] = task.final.review.overall_verdict
+        if task.final.patch:
+            result["has_patch"] = True
+            result["patch_model"] = task.final.patch.provenance.model
+    return result
+
+
+async def _cancel_task(
+    args: dict[str, Any],
+    orchestrator: Orchestrator,
+    registry: "CapabilityRegistry | None",
+) -> dict[str, Any]:
+    task_id = args["task_id"]
+    _validate_id(task_id)
+    cancelled = await orchestrator.cancel_task(task_id)
+    if cancelled:
+        return {"task_id": task_id, "cancelled": True}
+    # Not a background task — check if it exists at all
+    task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
+    if task is None:
+        return {"error": f"Task {task_id} not found"}
+    return {
+        "task_id": task_id,
+        "cancelled": False,
+        "reason": f"Task is not cancellable in status '{task.status}'",
     }
 
 

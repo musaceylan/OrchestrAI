@@ -15,7 +15,9 @@ from orchestrai.artifacts.schemas import (
 from orchestrai.artifacts.store import ArtifactStore
 from orchestrai.config.settings import get_settings
 from orchestrai.observability.trace import Tracer, make_agent_run_id, make_artifact_id, make_subtask_id
+from orchestrai.observability.metrics import agent_calls_total, cost_usd_total
 from orchestrai.policies.costs import estimate_cost
+from orchestrai.policies.safety import enforce_diff_safety, mask_pii
 from orchestrai.providers.base import BaseProvider, CompletionRequest, ProviderError
 from orchestrai.registry.registry import CapabilityRegistry
 
@@ -270,6 +272,10 @@ class BaseMode(ABC):
                     task.tokens_used.get(token_key, 0) + response.total_tokens
                 )
 
+                agent_calls_total.labels(role=role.value, provider=provider_name, status="success").inc()
+                if cost > 0:
+                    cost_usd_total.labels(provider=provider_name, model=response.model).inc(cost)
+
                 subtask.status = "done"
                 subtask.finished_at = time.time()
                 self._tracer.subtask_finished(
@@ -302,6 +308,7 @@ class BaseMode(ABC):
         subtask.status = "failed"
         subtask.error = error_msg
         subtask.finished_at = time.time()
+        agent_calls_total.labels(role=role.value, provider=provider_name, status="failed").inc()
         self._tracer.subtask_finished(
             subtask_id, role.value, success=False,
             duration_ms=duration_ms, error=error_msg,
@@ -362,11 +369,13 @@ class BaseMode(ABC):
         confidence: float = 0.7,
     ) -> CodePatch:
         diff = self._extract_diff(content)
+        enforce_diff_safety(diff)     # raises SafetyViolationError on dangerous patterns
+        diff = mask_pii(diff)          # scrub emails / API keys before storing
         return CodePatch(
             id=make_artifact_id(),
             kind=ArtifactKind.CODE_PATCH,
             provenance=provenance,
             unified_diff=diff,
-            description=content[:500] if len(content) > 500 else content,
+            description=mask_pii(content[:500] if len(content) > 500 else content),
             confidence=confidence,
         )
