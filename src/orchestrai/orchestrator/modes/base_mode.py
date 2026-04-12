@@ -9,11 +9,13 @@ from typing import Any
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    ArtifactKind, CodePatch, CompletionRequest as _CompReq, FinalDecision, OrchestratedTask,
+    ArtifactKind, CodePatch, FinalDecision, OrchestratedTask,
     Provenance, ReviewComments, RoutingDecision, RoleType, SubTask, TestCandidate,
 )
 from orchestrai.artifacts.store import ArtifactStore
+from orchestrai.config.settings import get_settings
 from orchestrai.observability.trace import Tracer, make_agent_run_id, make_artifact_id, make_subtask_id
+from orchestrai.policies.costs import estimate_cost
 from orchestrai.providers.base import BaseProvider, CompletionRequest, ProviderError
 from orchestrai.registry.registry import CapabilityRegistry
 
@@ -168,10 +170,16 @@ class BaseMode(ABC):
         model_id: str,
         user_prompt: str,
         extra_context: str = "",
+        _max_retries: int = 3,
+        _retry_base_delay: float = 1.0,
     ) -> tuple[str, SubTask]:
         """
         Call a single agent (provider/model) for a given role.
-        Returns (content, subtask).
+
+        Returns (content, subtask).  Retries up to _max_retries times on
+        transient ProviderErrors (retryable=True) with exponential backoff.
+        Also accumulates token counts and cost onto task.tokens_used /
+        task.cost_usd, and enforces policy.max_cost_usd before each call.
         """
         subtask_id = make_subtask_id()
         agent_run_id = make_agent_run_id()
@@ -187,7 +195,6 @@ class BaseMode(ABC):
             started_at=time.time(),
         )
         task.subtasks.append(subtask)
-
         self._tracer.subtask_started(subtask_id, role.value, provider_name, model_id)
 
         provider = self._registry.get_provider(provider_name)
@@ -199,6 +206,27 @@ class BaseMode(ABC):
                 subtask_id, role.value, success=False,
                 duration_ms=(subtask.finished_at - subtask.started_at) * 1000,
                 error=subtask.error,
+            )
+            return "", subtask
+
+        # ── Pre-flight budget check ───────────────────────────────────────
+        settings = get_settings()
+        if (
+            settings.policy.max_cost_usd is not None
+            and task.cost_usd >= settings.policy.max_cost_usd
+        ):
+            msg = (
+                f"Budget ${settings.policy.max_cost_usd:.4f} USD already reached "
+                f"(spent ${task.cost_usd:.4f}); skipping {role.value} call"
+            )
+            log.warning("agent.budget_preflight_skip", task_id=task.id, role=role.value,
+                        cost_usd=task.cost_usd, max_cost_usd=settings.policy.max_cost_usd)
+            subtask.status = "failed"
+            subtask.error = msg
+            subtask.finished_at = time.time()
+            self._tracer.subtask_finished(
+                subtask_id, role.value, success=False,
+                duration_ms=0.0, error=msg,
             )
             return "", subtask
 
@@ -216,47 +244,77 @@ class BaseMode(ABC):
         max_tokens = min(cap.max_output_tokens, 8192) if cap else 4096
 
         start = time.time()
-        try:
-            request = CompletionRequest(
-                messages=messages,
-                system=system,
-                model=model_id,
-                max_tokens=max_tokens,
-                temperature=0.2,
-                role=role,
-                task_id=task.id,
-                subtask_id=subtask_id,
-                agent_run_id=agent_run_id,
-            )
-            response = await provider.complete(request)
-            duration_ms = (time.time() - start) * 1000
+        last_error: ProviderError | None = None
 
-            subtask.status = "done"
-            subtask.finished_at = time.time()
-            self._tracer.subtask_finished(
-                subtask_id, role.value, success=True,
-                duration_ms=duration_ms,
-                tokens={"input": response.input_tokens, "output": response.output_tokens},
-            )
-            return response.content, subtask
+        for attempt in range(_max_retries):
+            try:
+                request = CompletionRequest(
+                    messages=messages,
+                    system=system,
+                    model=model_id,
+                    max_tokens=max_tokens,
+                    temperature=0.2,
+                    role=role,
+                    task_id=task.id,
+                    subtask_id=subtask_id,
+                    agent_run_id=agent_run_id,
+                )
+                response = await provider.complete(request)
+                duration_ms = (time.time() - start) * 1000
 
-        except ProviderError as e:
-            duration_ms = (time.time() - start) * 1000
-            subtask.status = "failed"
-            subtask.error = str(e)
-            subtask.finished_at = time.time()
-            self._tracer.subtask_finished(
-                subtask_id, role.value, success=False,
-                duration_ms=duration_ms, error=str(e),
-            )
-            log.error(
-                "agent.call_failed",
-                role=role.value,
-                provider=provider_name,
-                model=model_id,
-                error=str(e),
-            )
-            return "", subtask
+                # ── Accumulate tokens and cost ────────────────────────────
+                cost = estimate_cost(response.model, response.input_tokens, response.output_tokens)
+                task.cost_usd += cost
+                token_key = f"{provider_name}/{response.model}"
+                task.tokens_used[token_key] = (
+                    task.tokens_used.get(token_key, 0) + response.total_tokens
+                )
+
+                subtask.status = "done"
+                subtask.finished_at = time.time()
+                self._tracer.subtask_finished(
+                    subtask_id, role.value, success=True,
+                    duration_ms=duration_ms,
+                    tokens={"input": response.input_tokens, "output": response.output_tokens},
+                )
+                return response.content, subtask
+
+            except ProviderError as e:
+                last_error = e
+                if not e.retryable or attempt == _max_retries - 1:
+                    break
+                delay = _retry_base_delay * (2 ** attempt)
+                log.warning(
+                    "agent.retrying",
+                    role=role.value,
+                    provider=provider_name,
+                    model=model_id,
+                    attempt=attempt + 1,
+                    max_retries=_max_retries,
+                    delay_s=delay,
+                    error=str(e),
+                )
+                await asyncio.sleep(delay)
+
+        # All retries exhausted (or non-retryable error on first attempt)
+        duration_ms = (time.time() - start) * 1000
+        error_msg = str(last_error) if last_error else "Unknown error"
+        subtask.status = "failed"
+        subtask.error = error_msg
+        subtask.finished_at = time.time()
+        self._tracer.subtask_finished(
+            subtask_id, role.value, success=False,
+            duration_ms=duration_ms, error=error_msg,
+        )
+        log.error(
+            "agent.call_failed",
+            role=role.value,
+            provider=provider_name,
+            model=model_id,
+            error=error_msg,
+            attempts=attempt + 1,
+        )
+        return "", subtask
 
     def _parse_review(self, text: str) -> tuple[str, list[str], list[str]]:
         """Parse a model's JSON review response into (verdict, concerns, praise)."""

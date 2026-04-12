@@ -282,3 +282,6 @@ class OrchestratedTask(BaseModel):
     created_at: float = Field(default_factory=time.time)
     finished_at: float | None = None
     error: str | None = None
+    # Accumulated token usage and cost across all agent calls in this task
+    tokens_used: dict[str, int] = Field(default_factory=dict)  # key: "provider/model"
+    cost_usd: float = 0.0

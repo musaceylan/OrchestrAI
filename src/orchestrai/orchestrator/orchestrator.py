@@ -117,12 +117,19 @@ class Orchestrator:
         )
 
         start = time.time()
+        executor_task = asyncio.create_task(executor.run(task))
         try:
             await asyncio.wait_for(
-                executor.run(task),
+                executor_task,
                 timeout=self._settings.orchestrator.timeout_budget_sec,
             )
         except asyncio.TimeoutError:
+            # wait_for has already issued a cancel; wait for it to propagate so
+            # all child coroutines (asyncio.gather subtasks) are fully cancelled.
+            try:
+                await executor_task
+            except (asyncio.CancelledError, Exception):
+                pass
             task.status = "failed"
             task.error = f"Task exceeded timeout of {self._settings.orchestrator.timeout_budget_sec}s"
             log.error("orchestrator.timeout", task_id=task_id)
@@ -132,10 +139,14 @@ class Orchestrator:
             log.exception("orchestrator.error", task_id=task_id, error=str(e))
         finally:
             task.finished_at = time.time()
+            # Propagate accumulated cost/tokens into the final artifact
+            if task.final is not None:
+                task.final.tokens_used = task.tokens_used
+                task.final.cost_usd = task.cost_usd
             tracer.task_finished(
                 success=task.status == "done",
-                total_tokens={},
-                cost_usd=None,
+                total_tokens=task.tokens_used,
+                cost_usd=task.cost_usd if task.cost_usd > 0 else None,
                 error=task.error,
             )
             tracer.save()

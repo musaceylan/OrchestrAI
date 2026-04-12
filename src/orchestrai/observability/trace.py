@@ -115,10 +115,11 @@ class Tracer:
         )
 
     def artifact_created(self, artifact_id: str, kind: str, agent_run_id: str | None) -> None:
+        # Use `artifact_kind` in kwargs to avoid shadowing _emit's positional `kind` param.
         self._emit(
             "artifact_created",
             artifact_id=artifact_id,
-            kind=kind,
+            artifact_kind=kind,
             agent_run_id=agent_run_id,
         )
 
