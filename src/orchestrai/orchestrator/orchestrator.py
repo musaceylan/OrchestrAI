@@ -45,6 +45,8 @@ class Orchestrator:
         self._active: dict[str, OrchestratedTask] = {}
         self._finished: dict[str, OrchestratedTask] = {}  # recently completed tasks
         self._bg_tasks: dict[str, asyncio.Task[None]] = {}  # background asyncio tasks
+        # Per-task event log: task_id → list of {event, timestamp, ...}
+        self._events: dict[str, list[dict[str, Any]]] = {}
 
     async def submit(
         self,
@@ -69,6 +71,10 @@ class Orchestrator:
             mode=mode,
             user_preferences=user_preferences,
         )
+        self._events[task.id] = [
+            {"event": "task_started", "ts": time.time(), "mode": task.mode,
+             "task_type": task.brief.task_type.value}
+        ]
 
         if wait:
             await self._run(task, store, tracer, executor)
@@ -79,6 +85,17 @@ class Orchestrator:
             bg.add_done_callback(lambda _: self._bg_tasks.pop(task.id, None))
 
         return task
+
+    def push_event(self, task_id: str, event: dict[str, Any]) -> None:
+        """Append a timestamped event to the task's event log."""
+        log_entry = {"ts": time.time(), **event}
+        if task_id in self._events:
+            self._events[task_id].append(log_entry)
+
+    def get_events(self, task_id: str, offset: int = 0) -> list[dict[str, Any]]:
+        """Return task events from `offset` index onward (for incremental polling)."""
+        events = self._events.get(task_id, [])
+        return events[offset:]
 
     async def cancel_task(self, task_id: str) -> bool:
         """
@@ -225,12 +242,20 @@ class Orchestrator:
                 error=task.error,
             )
             tracer.save()
+            self.push_event(task.id, {
+                "event": "task_finished",
+                "status": task.status,
+                "cost_usd": task.cost_usd,
+                "tokens_used": task.tokens_used,
+                "error": task.error,
+            })
             self._active.pop(task.id, None)
             # Keep in finished cache for inspect tools; evict oldest if over cap
             self._finished[task.id] = task
             if len(self._finished) > _MAX_FINISHED:
                 oldest = next(iter(self._finished))
                 del self._finished[oldest]
+                self._events.pop(oldest, None)
 
         _duration = time.time() - start
         tasks_total.labels(status=task.status, mode=task.mode).inc()

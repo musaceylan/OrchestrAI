@@ -224,6 +224,27 @@ def build_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_task_events",
+            description=(
+                "Poll the live event log for a task. Returns all events from `offset` onward. "
+                "Call repeatedly with the last returned `next_offset` to get incremental updates "
+                "while the task runs. Events include: task_started, subtask_started, "
+                "subtask_finished, task_finished."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID"},
+                    "offset": {
+                        "type": "integer",
+                        "description": "Start from this event index (default: 0). "
+                                       "Pass the `next_offset` from the previous response.",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
             name="get_task_result",
             description="Get the final result of a completed task including the winning patch and verdict.",
             inputSchema={
@@ -269,6 +290,7 @@ async def handle_tool(
         "list_tasks": _list_tasks,
         "get_task_status": _get_task_status,
         "cancel_task": _cancel_task,
+        "get_task_events": _get_task_events,
         "get_task_result": _get_task_result,
     }
     handler = handlers.get(name)
@@ -689,6 +711,27 @@ async def _cancel_task(
         "task_id": task_id,
         "cancelled": False,
         "reason": f"Task is not cancellable in status '{task.status}'",
+    }
+
+
+async def _get_task_events(
+    args: dict[str, Any],
+    orchestrator: Orchestrator,
+    registry: "CapabilityRegistry | None",
+) -> dict[str, Any]:
+    task_id = args["task_id"]
+    _validate_id(task_id)
+    offset = int(args.get("offset", 0))
+    events = orchestrator.get_events(task_id, offset=offset)
+    task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
+    if task is None and not events:
+        return {"error": f"Task {task_id} not found"}
+    return {
+        "task_id": task_id,
+        "status": task.status if task else "unknown",
+        "events": events,
+        "next_offset": offset + len(events),
+        "done": task.status in ("done", "failed") if task else True,
     }
 
 

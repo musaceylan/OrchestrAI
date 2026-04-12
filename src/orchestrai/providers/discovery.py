@@ -14,6 +14,7 @@ from orchestrai.config.settings import get_settings
 from orchestrai.providers.anthropic import AnthropicProvider
 from orchestrai.providers.base import BaseProvider
 from orchestrai.providers.gemini import GeminiProvider
+from orchestrai.providers.ollama import OllamaProvider
 from orchestrai.providers.openai import OpenAIProvider
 from orchestrai.providers.openai_compat import OpenAICompatProvider
 
@@ -34,10 +35,15 @@ async def discover_providers() -> list[BaseProvider]:
         AnthropicProvider(),
         OpenAIProvider(),
         GeminiProvider(),
+        # Ollama — native provider (probes /api/version; skipped silently if not running)
+        OllamaProvider(),
     ]
 
-    # Add local providers from config
+    # Add additional local providers from config (generic OpenAI-compat endpoints)
     for lp in settings.local_providers:
+        # Skip the default Ollama entry — handled by OllamaProvider above
+        if lp.name == "ollama" and lp.base_url == "http://localhost:11434":
+            continue
         candidates.append(OpenAICompatProvider(lp))
 
     # Probe all in parallel
