@@ -245,6 +245,18 @@ def build_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="reload_config",
+            description=(
+                "Hot-reload configuration from disk (settings YAML + environment variables) "
+                "without restarting the server. Re-probes all providers after reload so "
+                "newly configured endpoints become available immediately."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
             name="get_task_result",
             description="Get the final result of a completed task including the winning patch and verdict.",
             inputSchema={
@@ -292,6 +304,7 @@ async def handle_tool(
         "cancel_task": _cancel_task,
         "get_task_events": _get_task_events,
         "get_task_result": _get_task_result,
+        "reload_config": _reload_config,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -732,6 +745,35 @@ async def _get_task_events(
         "events": events,
         "next_offset": offset + len(events),
         "done": task.status in ("done", "failed") if task else True,
+    }
+
+
+async def _reload_config(
+    args: dict[str, Any],
+    orchestrator: Orchestrator,
+    registry: "CapabilityRegistry | None",
+) -> dict[str, Any]:
+    from orchestrai.config.settings import reload_settings
+    from orchestrai.providers.discovery import discover_providers
+    from orchestrai.registry.registry import CapabilityRegistry as CR
+
+    new_settings = reload_settings()
+    # Update orchestrator's cached settings and router policy
+    orchestrator._settings = new_settings
+    orchestrator._router._policy = new_settings.policy
+
+    # Re-probe providers with the new config
+    providers = await discover_providers()
+    new_registry = await CR.build(providers)
+    orchestrator._registry = new_registry
+    orchestrator._router._registry = new_registry
+
+    return {
+        "reloaded": True,
+        "providers_found": len(providers),
+        "providers": [p.name for p in providers],
+        "total_models": len(new_registry.all_capabilities()),
+        "config_path": str(new_settings.model_config.get("env_file", "defaults")),
     }
 
 

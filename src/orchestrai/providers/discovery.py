@@ -17,6 +17,7 @@ from orchestrai.providers.gemini import GeminiProvider
 from orchestrai.providers.ollama import OllamaProvider
 from orchestrai.providers.openai import OpenAIProvider
 from orchestrai.providers.openai_compat import OpenAICompatProvider
+from orchestrai.providers.vllm import VLLMProvider
 
 if TYPE_CHECKING:
     pass
@@ -37,12 +38,16 @@ async def discover_providers() -> list[BaseProvider]:
         GeminiProvider(),
         # Ollama — native provider (probes /api/version; skipped silently if not running)
         OllamaProvider(),
+        # vLLM — OpenAI-compat local inference (probes /health or /v1/models)
+        VLLMProvider(),
     ]
 
     # Add additional local providers from config (generic OpenAI-compat endpoints)
     for lp in settings.local_providers:
-        # Skip the default Ollama entry — handled by OllamaProvider above
+        # Skip defaults handled by native providers above
         if lp.name == "ollama" and lp.base_url == "http://localhost:11434":
+            continue
+        if lp.name == "vllm" and lp.base_url == "http://localhost:8000":
             continue
         candidates.append(OpenAICompatProvider(lp))
 

@@ -134,3 +134,10 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings.load()
     return _settings
+
+
+def reload_settings() -> Settings:
+    """Force a reload of settings from disk/env. Returns the new Settings instance."""
+    global _settings
+    _settings = Settings.load()
+    return _settings

@@ -79,6 +79,12 @@ def _build_mcp_server() -> Server:
                 description="Active tasks and server health",
                 mimeType="application/json",
             ),
+            Resource(
+                uri="orchestrai://costs/summary",
+                name="Cost Summary",
+                description="Per-task and session-total token usage and cost in USD",
+                mimeType="application/json",
+            ),
         ]
 
     @server.read_resource()
@@ -95,6 +101,8 @@ def _build_mcp_server() -> Server:
                 },
                 indent=2,
             )
+        if uri == "orchestrai://costs/summary":
+            return json.dumps(orch.get_cost_summary(), indent=2, default=str)
         return json.dumps({"error": f"Unknown resource: {uri}"})
 
     @server.list_prompts()

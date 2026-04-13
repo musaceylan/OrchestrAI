@@ -279,6 +279,42 @@ class Orchestrator:
             for t in self._active.values()
         ]
 
+    def get_cost_summary(self) -> dict[str, Any]:
+        """Return per-task and session-total cost data."""
+        finished = list(self._finished.values())
+        active = list(self._active.values())
+        session_cost = sum(t.cost_usd for t in finished) + sum(t.cost_usd for t in active)
+        session_tokens = sum(t.tokens_used for t in finished) + sum(t.tokens_used for t in active)
+        per_task = [
+            {
+                "task_id": t.id,
+                "status": t.status,
+                "mode": t.mode,
+                "cost_usd": t.cost_usd,
+                "tokens_used": t.tokens_used,
+                "finished_at": t.finished_at,
+            }
+            for t in sorted(finished, key=lambda x: x.finished_at or 0, reverse=True)
+        ]
+        active_summary = [
+            {
+                "task_id": t.id,
+                "status": t.status,
+                "mode": t.mode,
+                "cost_usd": t.cost_usd,
+                "tokens_used": t.tokens_used,
+            }
+            for t in active
+        ]
+        return {
+            "session_total_cost_usd": round(session_cost, 6),
+            "session_total_tokens": session_tokens,
+            "finished_task_count": len(finished),
+            "active_task_count": len(active),
+            "active_tasks": active_summary,
+            "finished_tasks": per_task,
+        }
+
     def get_recent_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recently finished tasks, newest first."""
         finished = list(self._finished.values())
