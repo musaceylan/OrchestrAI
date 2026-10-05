@@ -19,11 +19,19 @@ import httpx
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    CostTier, LatencyTier, PrivacyLevel, ProviderKind, RoleType,
+    CostTier,
+    LatencyTier,
+    PrivacyLevel,
+    ProviderKind,
+    RoleType,
 )
+from orchestrai.config.settings import LocalProviderEndpoint
 from orchestrai.providers.base import (
-    BaseProvider, CompletionRequest, CompletionResponse,
-    ModelCapability, ProviderError,
+    BaseProvider,
+    CompletionRequest,
+    CompletionResponse,
+    ModelCapability,
+    ProviderError,
 )
 
 log = structlog.get_logger()
@@ -115,6 +123,7 @@ class VLLMProvider(BaseProvider):
             return []
 
         caps: list[ModelCapability] = []
+        is_loopback = LocalProviderEndpoint(base_url=self._base_url).is_loopback
         for entry in data.get("data", []):
             model_id: str = entry.get("id", "")
             if not model_id:
@@ -139,7 +148,9 @@ class VLLMProvider(BaseProvider):
                     max_output_tokens=min(ctx // 4, 8192),
                     latency_tier=LatencyTier.FAST,
                     cost_tier=CostTier.CHEAP,
-                    privacy_level=PrivacyLevel.SECRET,
+                    privacy_level=(
+                        PrivacyLevel.SECRET if is_loopback else PrivacyLevel.PUBLIC
+                    ),
                     supports_tool_calling=False,
                     supports_streaming=True,
                     preferred_roles=[RoleType.CODER, RoleType.TESTER],

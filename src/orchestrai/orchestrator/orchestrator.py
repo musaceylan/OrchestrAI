@@ -15,6 +15,7 @@ from orchestrai.artifacts.store import ArtifactStore
 from orchestrai.config.settings import get_settings
 from orchestrai.observability.metrics import task_duration_seconds, tasks_total
 from orchestrai.observability.trace import Tracer, make_task_id, make_trace_id
+from orchestrai.orchestrator.context import TaskContext, task_context
 from orchestrai.orchestrator.intake import build_task_brief, scan_repo
 from orchestrai.orchestrator.modes.impl_tester import ImplTesterMode
 from orchestrai.orchestrator.modes.parallel_draft import ParallelDraftMode
@@ -47,6 +48,7 @@ class Orchestrator:
         self._bg_tasks: dict[str, asyncio.Task[None]] = {}  # background asyncio tasks
         # Per-task event log: task_id → list of {event, timestamp, ...}
         self._events: dict[str, list[dict[str, Any]]] = {}
+        self._stores: dict[str, ArtifactStore] = {}
 
     async def submit(
         self,
@@ -56,6 +58,8 @@ class Orchestrator:
         mode: str | None = None,
         user_preferences: dict[str, Any] | None = None,
         wait: bool = True,
+        *,
+        _original_context: TaskContext | None = None,
     ) -> OrchestratedTask:
         """
         Main entrypoint: intake a task and orchestrate it end-to-end.
@@ -70,6 +74,7 @@ class Orchestrator:
             target_files=target_files,
             mode=mode,
             user_preferences=user_preferences,
+            original_context=_original_context,
         )
         self._events[task.id] = [
             {"event": "task_started", "ts": time.time(), "mode": task.mode,
@@ -120,6 +125,21 @@ class Orchestrator:
             task.error = "Cancelled by client"
         return True
 
+    async def rerun(
+        self, task_id: str, preferences: dict[str, Any],
+    ) -> OrchestratedTask:
+        original = self._active.get(task_id) or self._finished.get(task_id)
+        if original is None or original._context is None:
+            raise ValueError("Original task policy is unavailable")
+        return await self.submit(
+            request=original.brief.description,
+            repo_root=original.brief.repo_root,
+            target_files=list(original.brief.target_files),
+            mode=original.mode,
+            user_preferences=preferences,
+            _original_context=task_context(original),
+        )
+
     async def _prepare(
         self,
         request: str,
@@ -127,8 +147,13 @@ class Orchestrator:
         target_files: list[str] | None,
         mode: str | None,
         user_preferences: dict[str, Any] | None,
+        original_context: TaskContext | None = None,
     ) -> tuple[OrchestratedTask, ArtifactStore, Tracer, Any]:
         """Set up all state for a task without running it. Returns (task, store, tracer, executor)."""
+        context = TaskContext.resolve(
+            self._settings.policy, user_preferences, original_context,
+            registry_supplier=lambda: self._registry,
+        )
         task_id = make_task_id()
         trace_id = make_trace_id()
         store = ArtifactStore(task_id)
@@ -163,7 +188,7 @@ class Orchestrator:
             task_type=brief.task_type,
             mode=mode,
             task_id=task_id,
-            user_preferences=user_preferences,
+            context=context,
         )
         store.put(routing)
 
@@ -176,7 +201,9 @@ class Orchestrator:
             routing=routing,
             status="running",
         )
+        task._context = context
         self._active[task_id] = task
+        self._stores[task_id] = store
 
         tracer.task_started(mode=mode, task_type=brief.task_type.value)
         tracer.routing_decided(assignments=routing.assignments, rationale=routing.rationale)
@@ -256,6 +283,7 @@ class Orchestrator:
                 oldest = next(iter(self._finished))
                 del self._finished[oldest]
                 self._events.pop(oldest, None)
+                self._stores.pop(oldest, None)
 
         _duration = time.time() - start
         tasks_total.labels(status=task.status, mode=task.mode).inc()

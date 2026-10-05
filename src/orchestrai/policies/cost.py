@@ -5,6 +5,7 @@ Caps routing to models within a specified cost tier budget.
 from __future__ import annotations
 
 from orchestrai.artifacts.schemas import CostTier
+from orchestrai.policies.eligibility import COST_ORDER
 from orchestrai.providers.base import ModelCapability
 
 
@@ -18,6 +19,4 @@ def filter_by_cost(
 
 
 def _allowed_tiers(max_tier: CostTier) -> set[CostTier]:
-    order = [CostTier.CHEAP, CostTier.MEDIUM, CostTier.EXPENSIVE]
-    idx = order.index(max_tier)
-    return set(order[: idx + 1])
+    return set(COST_ORDER[: COST_ORDER.index(max_tier) + 1])

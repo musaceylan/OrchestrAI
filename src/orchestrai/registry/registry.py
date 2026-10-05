@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from orchestrai.artifacts.schemas import CostTier, PrivacyLevel, RoleType
+from orchestrai.policies.eligibility import Eligibility
 from orchestrai.providers.base import (
     BaseProvider,
     ModelCapability,
@@ -103,35 +104,16 @@ class CapabilityRegistry:
         Return models suitable for a role, filtered by policy constraints,
         sorted by role strength descending.
         """
-        _privacy_order = {
-            PrivacyLevel.PUBLIC: 0,
-            PrivacyLevel.INTERNAL: 1,
-            PrivacyLevel.CONFIDENTIAL: 2,
-            PrivacyLevel.SECRET: 3,
-        }
-        _cost_order = {
-            CostTier.CHEAP: 0,
-            CostTier.MEDIUM: 1,
-            CostTier.EXPENSIVE: 2,
-        }
-
-        results = []
-        for cap in self.available_capabilities():
-            if cap.strength_for_role(role) < min_strength:
-                continue
-            if provider_allowlist and cap.provider not in provider_allowlist:
-                continue
-            if provider_denylist and cap.provider in provider_denylist:
-                continue
-            # Model must be at least as private as required
-            if (
-                privacy_max is not None
-                and _privacy_order[cap.privacy_level] < _privacy_order[privacy_max]
-            ):
-                continue
-            if cost_max is not None and _cost_order[cap.cost_tier] > _cost_order[cost_max]:
-                continue
-            results.append(cap)
+        eligibility = Eligibility(
+            privacy=privacy_max or PrivacyLevel.PUBLIC,
+            cost_max=cost_max,
+            allowed=frozenset(provider_allowlist) if provider_allowlist else None,
+            denied=frozenset(provider_denylist or ()),
+        )
+        results = [
+            cap for cap in self.available_capabilities()
+            if cap.strength_for_role(role) >= min_strength and eligibility.allows(cap)
+        ]
 
         results.sort(key=lambda c: c.strength_for_role(role), reverse=True)
         return results

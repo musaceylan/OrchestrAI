@@ -9,13 +9,26 @@ from typing import Any
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    ArtifactKind, CodePatch, FinalDecision, OrchestratedTask,
-    Provenance, ReviewComments, RoutingDecision, RoleType, SubTask, TestCandidate,
+    ArtifactKind,
+    CodePatch,
+    FinalDecision,
+    OrchestratedTask,
+    Provenance,
+    ReviewComments,
+    RoleType,
+    RoutingDecision,
+    SubTask,
+    TestCandidate,
 )
 from orchestrai.artifacts.store import ArtifactStore
-from orchestrai.config.settings import get_settings
-from orchestrai.observability.trace import Tracer, make_agent_run_id, make_artifact_id, make_subtask_id
 from orchestrai.observability.metrics import agent_calls_total, cost_usd_total
+from orchestrai.observability.trace import (
+    Tracer,
+    make_agent_run_id,
+    make_artifact_id,
+    make_subtask_id,
+)
+from orchestrai.orchestrator.context import EligibilityError, task_context
 from orchestrai.policies.costs import estimate_cost
 from orchestrai.policies.safety import enforce_diff_safety, mask_pii
 from orchestrai.providers.base import BaseProvider, CompletionRequest, ProviderError
@@ -199,38 +212,7 @@ class BaseMode(ABC):
         task.subtasks.append(subtask)
         self._tracer.subtask_started(subtask_id, role.value, provider_name, model_id)
 
-        provider = self._registry.get_provider(provider_name)
-        if provider is None:
-            subtask.status = "failed"
-            subtask.error = f"Provider '{provider_name}' not found in registry"
-            subtask.finished_at = time.time()
-            self._tracer.subtask_finished(
-                subtask_id, role.value, success=False,
-                duration_ms=(subtask.finished_at - subtask.started_at) * 1000,
-                error=subtask.error,
-            )
-            return "", subtask
-
-        # ── Pre-flight budget check ───────────────────────────────────────
-        settings = get_settings()
-        if (
-            settings.policy.max_cost_usd is not None
-            and task.cost_usd >= settings.policy.max_cost_usd
-        ):
-            msg = (
-                f"Budget ${settings.policy.max_cost_usd:.4f} USD already reached "
-                f"(spent ${task.cost_usd:.4f}); skipping {role.value} call"
-            )
-            log.warning("agent.budget_preflight_skip", task_id=task.id, role=role.value,
-                        cost_usd=task.cost_usd, max_cost_usd=settings.policy.max_cost_usd)
-            subtask.status = "failed"
-            subtask.error = msg
-            subtask.finished_at = time.time()
-            self._tracer.subtask_finished(
-                subtask_id, role.value, success=False,
-                duration_ms=0.0, error=msg,
-            )
-            return "", subtask
+        context = task_context(task)
 
         # Merge extra_context into a single user message to avoid consecutive
         # user turn errors (OpenAI rejects [user, user] message sequences).
@@ -242,11 +224,11 @@ class BaseMode(ABC):
         messages = [{"role": "user", "content": full_prompt}]
 
         # Respect the model's published output limit; fall back to 4096.
-        cap = self._registry.get_capability(provider_name, model_id)
+        cap = context.current_registry(self._registry).get_capability(provider_name, model_id)
         max_tokens = min(cap.max_output_tokens, 8192) if cap else 4096
 
         start = time.time()
-        last_error: ProviderError | None = None
+        last_error: ProviderError | EligibilityError | None = None
 
         for attempt in range(_max_retries):
             try:
@@ -261,17 +243,11 @@ class BaseMode(ABC):
                     subtask_id=subtask_id,
                     agent_run_id=agent_run_id,
                 )
-                response = await provider.complete(request)
+                response = await context.complete(task, self._registry, provider_name, request)
                 duration_ms = (time.time() - start) * 1000
 
-                # ── Accumulate tokens and cost ────────────────────────────
+                # Task accounting is owned by the context; publish mode metrics here.
                 cost = estimate_cost(response.model, response.input_tokens, response.output_tokens)
-                task.cost_usd += cost
-                token_key = f"{provider_name}/{response.model}"
-                task.tokens_used[token_key] = (
-                    task.tokens_used.get(token_key, 0) + response.total_tokens
-                )
-
                 agent_calls_total.labels(role=role.value, provider=provider_name, status="success").inc()
                 if cost > 0:
                     cost_usd_total.labels(provider=provider_name, model=response.model).inc(cost)
@@ -285,6 +261,9 @@ class BaseMode(ABC):
                 )
                 return response.content, subtask
 
+            except EligibilityError as e:
+                last_error = e
+                break
             except ProviderError as e:
                 last_error = e
                 if not e.retryable or attempt == _max_retries - 1:

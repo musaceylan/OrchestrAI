@@ -16,6 +16,7 @@ from orchestrai.artifacts.schemas import (
     RoleType,
 )
 from orchestrai.observability.trace import make_artifact_id
+from orchestrai.orchestrator.context import EligibilityError, task_context
 from orchestrai.orchestrator.modes.base_mode import ROLE_SYSTEM_PROMPTS, _extract_json
 from orchestrai.providers.base import CompletionRequest
 from orchestrai.registry.registry import CapabilityRegistry
@@ -34,11 +35,13 @@ async def run_judge(
     Invalid explicit overrides raise before judging. Automatic selection and
     completion failures retain the heuristic fallback.
     """
+    context = task_context(task)
+    registry = context.current_registry(registry)
     override_cap = None
     if judge_model_override is not None:
         override_cap = registry.resolve_model_reference(judge_model_override)
-        if not override_cap.available:
-            raise ValueError("Judge model override is not available")
+        if not context.eligibility.allows(override_cap):
+            raise EligibilityError("Judge model override is not eligible under task policy")
 
     if len(candidates) < 2:
         # Nothing to judge
@@ -53,15 +56,11 @@ async def run_judge(
         )
 
     # Try to find best judge model (planning + review strength)
-    judge_caps = [override_cap] if override_cap else registry.capabilities_for_role(RoleType.JUDGE)
+    judge_caps = [override_cap] if override_cap else context.candidates(registry, RoleType.JUDGE)
     if not judge_caps:
         return _heuristic_judge(task, candidates)
 
     judge_cap = judge_caps[0]
-    provider = registry.get_provider(judge_cap.provider)
-    if provider is None:
-        return _heuristic_judge(task, candidates)
-
     # Build comparison prompt
     comparison = _build_comparison(task, candidates)
     system = ROLE_SYSTEM_PROMPTS[RoleType.JUDGE]
@@ -77,8 +76,12 @@ async def run_judge(
     )
 
     try:
-        response = await provider.complete(request)
+        response = await context.complete(task, registry, judge_cap.provider, request)
         return _parse_judge_response(task, candidates, response.content)
+    except EligibilityError:
+        if judge_model_override is not None:
+            raise
+        return _heuristic_judge(task, candidates)
     except Exception as e:
         log.warning("judge.provider_failed", error=str(e))
         return _heuristic_judge(task, candidates)

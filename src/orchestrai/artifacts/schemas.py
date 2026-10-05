@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import time
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
+
+if TYPE_CHECKING:
+    from orchestrai.orchestrator.context import TaskContext
 
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
@@ -270,6 +273,9 @@ class SubTask(BaseModel):
 
 
 class OrchestratedTask(BaseModel):
+    # Server-owned admission state; never parsed from or serialized into artifacts.
+    _context: TaskContext | None = PrivateAttr(default=None)
+
     id: str
     trace_id: str
     brief: TaskBrief

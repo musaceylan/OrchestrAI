@@ -571,10 +571,11 @@ async def _compare_candidates(
     registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     from orchestrai.artifacts.schemas import ArtifactKind, CodePatch
-    from orchestrai.artifacts.store import ArtifactStore
     task_id = args["task_id"]
     _validate_id(task_id)
-    store = ArtifactStore(task_id)
+    store = orchestrator._stores.get(task_id)
+    if store is None:
+        return {"error": "Task artifacts or original policy unavailable"}
     raw_patches = store.list_by_kind(ArtifactKind.CODE_PATCH)
     if not raw_patches:
         return {"error": f"No code patches found for task {task_id}"}
@@ -618,32 +619,10 @@ async def _rerun_with_policy(
     orchestrator: Orchestrator,
     registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
-    from orchestrai.artifacts.schemas import ArtifactKind
-    from orchestrai.artifacts.store import ArtifactStore
     task_id = args["task_id"]
+    _validate_id(task_id)
     overrides = args.get("policy_overrides", {})
-
-    store = ArtifactStore(task_id)
-    briefs = store.list_by_kind(ArtifactKind.TASK_BRIEF)
-    if not briefs:
-        return {"error": f"No task brief found for {task_id}"}
-    brief = briefs[0]  # raw dict from store
-
-    # Convert policy overrides to user_preferences format
-    user_prefs = {
-        "privacy_level": overrides.get("privacy_level"),
-        "cost_tier": overrides.get("cost_tier"),
-        "preferred_providers": overrides.get("allowed_providers", []),
-        "denied_providers": overrides.get("denied_providers", []),
-    }
-    user_prefs = {k: v for k, v in user_prefs.items() if v}
-
-    task = await orchestrator.submit(
-        request=brief.get("description") or brief.get("raw_request", ""),
-        repo_root=brief.get("repo_root"),
-        target_files=brief.get("target_files"),
-        user_preferences=user_prefs or None,
-    )
+    task = await orchestrator.rerun(task_id, overrides)
     return {
         "original_task_id": task_id,
         "new_task_id": task.id,

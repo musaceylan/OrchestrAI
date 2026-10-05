@@ -5,6 +5,7 @@ Ensures tasks with sensitive data only route to approved privacy tiers.
 from __future__ import annotations
 
 from orchestrai.artifacts.schemas import PrivacyLevel
+from orchestrai.policies.eligibility import PRIVACY_ORDER
 from orchestrai.providers.base import ModelCapability
 
 
@@ -28,13 +29,4 @@ def filter_by_privacy(
 
 
 def _allowed_levels(required: PrivacyLevel) -> set[PrivacyLevel]:
-    # Most strict → least strict
-    hierarchy = [
-        PrivacyLevel.SECRET,
-        PrivacyLevel.CONFIDENTIAL,
-        PrivacyLevel.INTERNAL,
-        PrivacyLevel.PUBLIC,
-    ]
-    idx = hierarchy.index(required)
-    # A model is allowed if its privacy level is at least as strict as required
-    return set(hierarchy[: idx + 1])
+    return set(PRIVACY_ORDER[PRIVACY_ORDER.index(required):])

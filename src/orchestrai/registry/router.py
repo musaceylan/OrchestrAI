@@ -10,17 +10,14 @@ import structlog
 
 from orchestrai.artifacts.schemas import (
     ArtifactKind,
-    CostTier,
-    LatencyTier,
     PrivacyLevel,
-    ProviderKind,
-    RoutingDecision,
     RoleType,
+    RoutingDecision,
     TaskType,
 )
 from orchestrai.config.settings import PolicyConfig
-from orchestrai.observability.trace import make_artifact_id, make_task_id
-from orchestrai.providers.base import ModelCapability
+from orchestrai.observability.trace import make_artifact_id
+from orchestrai.orchestrator.context import TaskContext
 from orchestrai.registry.registry import CapabilityRegistry
 
 log = structlog.get_logger()
@@ -88,59 +85,33 @@ class RoutingEngine:
         mode: str,
         task_id: str,
         user_preferences: dict[str, Any] | None = None,
+        *,
+        context: TaskContext | None = None,
     ) -> RoutingDecision:
         """
         Assign a best-fit model to each role for the given mode.
         Returns a RoutingDecision artifact with full rationale.
         """
         from orchestrai.artifacts.schemas import Provenance
-        from orchestrai.observability.trace import make_trace_id
 
         prefs = user_preferences or {}
         roles = MODE_ROLES.get(mode, MODE_ROLES["planner_coder_reviewer"])
 
-        # Resolve policy constraints
-        privacy_required = PrivacyLevel(
-            prefs.get("privacy_level", self._policy.privacy_level)
-        )
-        local_only = prefs.get("local_only", self._policy.local_only_mode)
-        cost_max_str = prefs.get("cost_max", None)
-        cost_max = CostTier(cost_max_str) if cost_max_str else None
-
-        allowlist = (
-            [p for p in self._policy.allowed_providers]
-            if self._policy.allowed_providers
-            else None
-        )
-        denylist = list(self._policy.denied_providers) if self._policy.denied_providers else []
-
-        if local_only:
-            # Force local-only by constraining to OpenAI-compat + confidential+
-            allowlist = [
-                p.name for p in self._registry.all_providers()
-                if p.kind == ProviderKind.OPENAI_COMPAT
-            ]
-            privacy_required = PrivacyLevel.CONFIDENTIAL
+        context = context or TaskContext.resolve(self._policy, prefs)
+        eligibility = context.eligibility
 
         assignments: list[dict[str, Any]] = []
         skipped: list[str] = []
         policy_constraints: list[str] = []
         used_models: set[str] = set()  # avoid assigning same model twice when possible
 
-        if local_only:
+        if eligibility.local_only:
             policy_constraints.append("local_only_mode=true")
-        if privacy_required != PrivacyLevel.PUBLIC:
-            policy_constraints.append(f"privacy_required={privacy_required.value}")
+        if eligibility.privacy != PrivacyLevel.PUBLIC:
+            policy_constraints.append(f"privacy_required={eligibility.privacy.value}")
 
         for role in roles:
-            candidates = self._registry.capabilities_for_role(
-                role=role,
-                min_strength=0.0,
-                privacy_max=privacy_required,
-                cost_max=cost_max,
-                provider_allowlist=allowlist,
-                provider_denylist=denylist,
-            )
+            candidates = context.candidates(self._registry, role)
 
             if not candidates:
                 skipped.append(role.value)

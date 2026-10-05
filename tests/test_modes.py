@@ -552,10 +552,15 @@ class TestCostTracking:
 
         p = _KnownModelProvider("p1")
         registry = _make_registry(p)
+        registry._capabilities = {
+            ("p1", "claude-sonnet-4-6"): _make_cap("p1", "claude-sonnet-4-6"),
+        }
 
         task = _task(
             task_id, "parallel_draft",
-            _make_routing(task_id, [{"role": "coder", "provider": "p1", "model": "mock-model"}]),
+            _make_routing(task_id, [
+                {"role": "coder", "provider": "p1", "model": "claude-sonnet-4-6"},
+            ]),
         )
 
         result = await ParallelDraftMode(registry, store, tracer).run(task)
@@ -567,16 +572,14 @@ class TestCostTracking:
         self, tmp_dirs: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When budget is already exceeded, no API call should be made."""
-        from unittest.mock import MagicMock
-        from orchestrai.config import settings as settings_module
+        from types import SimpleNamespace
+
+        from orchestrai.config.settings import PolicyConfig
 
         # Build a settings object with a tiny budget and inject it
-        mock_policy = MagicMock()
-        mock_policy.max_cost_usd = 0.0001
-        mock_settings = MagicMock()
-        mock_settings.policy = mock_policy
+        mock_settings = SimpleNamespace(policy=PolicyConfig(max_cost_usd=0.0001))
         monkeypatch.setattr(
-            "orchestrai.orchestrator.modes.base_mode.get_settings",
+            "orchestrai.orchestrator.context.get_settings",
             lambda: mock_settings,
         )
 
