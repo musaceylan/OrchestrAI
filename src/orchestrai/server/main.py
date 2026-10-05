@@ -25,7 +25,7 @@ from mcp.types import (
     Tool,
 )
 
-from orchestrai.config.settings import get_settings
+from orchestrai.config.settings import Settings, get_settings, publish_settings
 from orchestrai.observability.trace import configure_logging
 from orchestrai.orchestrator.orchestrator import Orchestrator
 from orchestrai.providers.discovery import discover_providers
@@ -37,6 +37,22 @@ log = structlog.get_logger()
 
 _orchestrator: Orchestrator | None = None
 _registry: CapabilityRegistry | None = None
+
+
+def publish_runtime(
+    orchestrator: Orchestrator,
+    settings: Settings,
+    registry: CapabilityRegistry,
+) -> None:
+    """Publish one validated runtime to every live server consumer."""
+    global _registry
+    orchestrator._settings = settings
+    orchestrator._router._policy = settings.policy
+    orchestrator._registry = registry
+    orchestrator._router._registry = registry
+    if _orchestrator is orchestrator:
+        _registry = registry
+    publish_settings(settings)
 
 
 async def get_orchestrator() -> Orchestrator:
@@ -112,7 +128,11 @@ def _build_mcp_server() -> Server:
                 name=p["name"],
                 description=p["description"],
                 arguments=[
-                    PromptArgument(name=a["name"], description=a["description"], required=a.get("required", False))
+                    PromptArgument(
+                        name=a["name"],
+                        description=a["description"],
+                        required=a.get("required", False),
+                    )
                     for a in p.get("arguments", [])
                 ],
             )

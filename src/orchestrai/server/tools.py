@@ -4,13 +4,13 @@ MCP Tool definitions and dispatch for OrchestrAI.
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from typing import Any
 
 import structlog
 from mcp.types import Tool
 
 from orchestrai.observability.metrics import tool_calls_total
-
 from orchestrai.orchestrator.judge import run_judge
 from orchestrai.orchestrator.orchestrator import Orchestrator
 from orchestrai.registry.registry import CapabilityRegistry
@@ -34,11 +34,17 @@ def build_tools() -> list[Tool]:
                 "properties": {
                     "request": {
                         "type": "string",
-                        "description": "The task description (e.g. 'Add pagination to the users endpoint')",
+                        "description": (
+                            "The task description (e.g. 'Add pagination to the "
+                            "users endpoint')"
+                        ),
                     },
                     "repo_root": {
                         "type": "string",
-                        "description": "Absolute path to the repository root (enables static analysis and test runs)",
+                        "description": (
+                            'Absolute path to the repository root (enables '
+                            'static analysis and test runs)'
+                        ),
                     },
                     "target_files": {
                         "type": "array",
@@ -47,17 +53,24 @@ def build_tools() -> list[Tool]:
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["parallel_draft", "impl_tester", "planner_coder_reviewer", "bugfix", "refactor", "docs"],
+                        "enum": [
+                            "parallel_draft", "impl_tester", "planner_coder_reviewer",
+                            "bugfix", "refactor", "docs",
+                        ],
                         "description": "Orchestration mode (auto-detected if omitted)",
                     },
                     "user_preferences": {
                         "type": "object",
-                        "description": "Override routing: {preferred_providers: [...], privacy_level: ..., cost_tier: ...}",
+                        "description": (
+                            'Override routing: {preferred_providers: [...], '
+                            'privacy_level: ..., cost_tier: ...}'
+                        ),
                     },
                     "wait": {
                         "type": "boolean",
                         "description": (
-                            "If true (default), block until the task completes and return the full result. "
+                            'If true (default), block until the task completes '
+                            'and return the full result. '
                             "If false, return immediately with task_id and status='running'; "
                             "use get_task_status to poll for completion."
                         ),
@@ -79,7 +92,10 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="inspect_registry",
-            description="List all available providers and their model capabilities, grouped by role strengths.",
+            description=(
+                'List all available providers and their model '
+                'capabilities, grouped by role strengths.'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -122,7 +138,10 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="inspect_trace",
-            description="Get the full execution trace for a task including timing, tokens, and decisions.",
+            description=(
+                'Get the full execution trace for a task including '
+                'timing, tokens, and decisions.'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -133,14 +152,22 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="compare_candidates",
-            description="Compare multiple code candidates from a parallel_draft run and get a judge verdict.",
+            description=(
+                'Compare multiple code candidates from a '
+                'parallel_draft run and get a judge verdict.'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task_id": {"type": "string", "description": "Task ID from a parallel_draft run"},
+                    "task_id": {"type": "string", "description": (
+                        'Task ID from a parallel_draft run'
+                    )},
                     "judge_model": {
                         "type": "string",
-                        "description": "Specific model to use as judge (optional, uses best available)",
+                        "description": (
+                            'Specific model to use as judge (optional, uses '
+                            'best available)'
+                        ),
                     },
                 },
                 "required": ["task_id"],
@@ -148,14 +175,20 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="rerun_with_policy",
-            description="Re-run a task with different policy constraints (e.g. local-only, lower cost).",
+            description=(
+                'Re-run a task with different policy constraints '
+                '(e.g. local-only, lower cost).'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string", "description": "Original task ID to re-run"},
                     "policy_overrides": {
                         "type": "object",
-                        "description": "Policy fields to override: {privacy_level, cost_tier, allowed_providers, denied_providers}",
+                        "description": (
+                            'Policy fields to override: {privacy_level, '
+                            'cost_tier, allowed_providers, denied_providers}'
+                        ),
                     },
                 },
                 "required": ["task_id", "policy_overrides"],
@@ -163,7 +196,10 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="list_available_models",
-            description="List all models discovered across all active providers with their capabilities.",
+            description=(
+                'List all models discovered across all active '
+                'providers with their capabilities.'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -176,7 +212,10 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="probe_providers",
-            description="Re-probe all configured providers to check availability and update the registry.",
+            description=(
+                'Re-probe all configured providers to check '
+                'availability and update the registry.'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -193,7 +232,10 @@ def build_tools() -> list[Tool]:
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "description": "Max number of recently finished tasks to include (default: 20)",
+                        "description": (
+                            'Max number of recently finished tasks to include '
+                            '(default: 20)'
+                        ),
                     },
                 },
             },
@@ -258,7 +300,10 @@ def build_tools() -> list[Tool]:
         ),
         Tool(
             name="get_task_result",
-            description="Get the final result of a completed task including the winning patch and verdict.",
+            description=(
+                'Get the final result of a completed task '
+                'including the winning patch and verdict.'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -286,7 +331,7 @@ async def handle_tool(
     name: str,
     arguments: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> Any:
     handlers = {
         "submit_task": _submit_task,
@@ -341,7 +386,7 @@ async def handle_tool(
 async def _submit_task(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     wait = args.get("wait", True)
     task = await orchestrator.submit(
@@ -381,7 +426,7 @@ async def _submit_task(
 async def _inspect_plan(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     task_id = args["task_id"]
     task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
@@ -398,7 +443,7 @@ async def _inspect_plan(
 async def _inspect_registry(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     if registry is None:
         return {"error": "Registry not initialized"}
@@ -430,7 +475,7 @@ async def _inspect_registry(
 async def _inspect_agents(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     task_id = args["task_id"]
     task = orchestrator._active.get(task_id) or orchestrator._finished.get(task_id)
@@ -459,10 +504,10 @@ async def _inspect_agents(
 async def _inspect_artifacts(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
-    from orchestrai.artifacts.store import ArtifactStore
     from orchestrai.artifacts.schemas import ArtifactKind
+    from orchestrai.artifacts.store import ArtifactStore
     task_id = args["task_id"]
     _validate_id(task_id)
     store = ArtifactStore(task_id)
@@ -494,10 +539,11 @@ async def _inspect_artifacts(
 async def _inspect_trace(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     import json
     from pathlib import Path
+
     from orchestrai.config.settings import get_settings
     task_id = args["task_id"]
     _validate_id(task_id)
@@ -514,20 +560,18 @@ async def _inspect_trace(
         for line in f:
             line = line.strip()
             if line:
-                try:
+                with suppress(Exception):
                     events.append(json.loads(line))
-                except Exception:
-                    pass
     return {"task_id": task_id, "event_count": len(events), "events": events}
 
 
 async def _compare_candidates(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
-    from orchestrai.artifacts.store import ArtifactStore
     from orchestrai.artifacts.schemas import ArtifactKind, CodePatch
+    from orchestrai.artifacts.store import ArtifactStore
     task_id = args["task_id"]
     _validate_id(task_id)
     store = ArtifactStore(task_id)
@@ -572,10 +616,10 @@ async def _compare_candidates(
 async def _rerun_with_policy(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
-    from orchestrai.artifacts.store import ArtifactStore
     from orchestrai.artifacts.schemas import ArtifactKind
+    from orchestrai.artifacts.store import ArtifactStore
     task_id = args["task_id"]
     overrides = args.get("policy_overrides", {})
 
@@ -611,7 +655,7 @@ async def _rerun_with_policy(
 async def _list_available_models(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     if registry is None:
         return {"error": "Registry not initialized"}
@@ -643,26 +687,38 @@ async def _list_available_models(
 async def _probe_providers(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
+    from orchestrai.config.settings import candidate_settings, get_settings
     from orchestrai.providers.discovery import discover_providers
     from orchestrai.registry.registry import CapabilityRegistry as CR
-    providers = await discover_providers()
-    new_registry = await CR.build(providers)
-    # Swap in new registry
-    orchestrator._registry = new_registry
-    orchestrator._router._registry = new_registry
+
+    source_settings = orchestrator._settings
+    source_registry = orchestrator._registry
+    with candidate_settings(source_settings):
+        providers = await discover_providers()
+        new_registry = await CR.build(providers)
+    published = (
+        orchestrator._settings is source_settings
+        and orchestrator._registry is source_registry
+        and get_settings() is source_settings
+    )
+    if published:
+        from orchestrai.server.main import publish_runtime
+
+        publish_runtime(orchestrator, source_settings, new_registry)
     return {
         "providers_found": len(providers),
         "providers": [p.name for p in providers],
         "total_models": len(new_registry.all_capabilities()),
+        "published": published,
     }
 
 
 async def _list_tasks(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     limit = int(args.get("limit", 20))
     return {
@@ -674,7 +730,7 @@ async def _list_tasks(
 async def _get_task_status(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     task_id = args["task_id"]
     _validate_id(task_id)
@@ -709,7 +765,7 @@ async def _get_task_status(
 async def _cancel_task(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     task_id = args["task_id"]
     _validate_id(task_id)
@@ -730,7 +786,7 @@ async def _cancel_task(
 async def _get_task_events(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
     task_id = args["task_id"]
     _validate_id(task_id)
@@ -751,39 +807,59 @@ async def _get_task_events(
 async def _reload_config(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
-    from orchestrai.config.settings import reload_settings
+    from orchestrai.config.settings import (
+        candidate_settings,
+        get_settings,
+        reload_settings,
+    )
     from orchestrai.providers.discovery import discover_providers
     from orchestrai.registry.registry import CapabilityRegistry as CR
 
-    new_settings = reload_settings()
-    # Update orchestrator's cached settings and router policy
-    orchestrator._settings = new_settings
-    orchestrator._router._policy = new_settings.policy
+    source_settings = orchestrator._settings
+    source_registry = orchestrator._registry
+    source_global_settings = get_settings()
+    try:
+        new_settings = reload_settings(publish=False)
+        # Provider constructors already use get_settings(). Give discovery a
+        # task-local candidate without exposing it to other requests.
+        with candidate_settings(new_settings):
+            providers = await discover_providers()
+            new_registry = await CR.build(providers)
+        result = {
+            "reloaded": True,
+            "providers_found": len(providers),
+            "providers": [p.name for p in providers],
+            "total_models": len(new_registry.all_capabilities()),
+            "config_path": new_settings.config_source,
+        }
+    except Exception:
+        return {"error": "Configuration reload failed"}
 
-    # Re-probe providers with the new config
-    providers = await discover_providers()
-    new_registry = await CR.build(providers)
-    orchestrator._registry = new_registry
-    orchestrator._router._registry = new_registry
+    # No awaits in publication: other asyncio requests see the old runtime
+    # throughout preparation, and the complete new runtime after publication.
+    published = (
+        orchestrator._settings is source_settings
+        and orchestrator._registry is source_registry
+        and get_settings() is source_global_settings
+    )
+    if not published:
+        return {"reloaded": False, "error": "Configuration reload superseded"}
 
-    return {
-        "reloaded": True,
-        "providers_found": len(providers),
-        "providers": [p.name for p in providers],
-        "total_models": len(new_registry.all_capabilities()),
-        "config_path": str(new_settings.model_config.get("env_file", "defaults")),
-    }
+    from orchestrai.server.main import publish_runtime
+
+    publish_runtime(orchestrator, new_settings, new_registry)
+    return result
 
 
 async def _get_task_result(
     args: dict[str, Any],
     orchestrator: Orchestrator,
-    registry: "CapabilityRegistry | None",
+    registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
-    from orchestrai.artifacts.store import ArtifactStore
     from orchestrai.artifacts.schemas import ArtifactKind
+    from orchestrai.artifacts.store import ArtifactStore
     task_id = args["task_id"]
     include_diff = args.get("include_diff", True)
     store = ArtifactStore(task_id)

@@ -1,5 +1,10 @@
 # OrchestrAI Default Configuration
 # Override any value via environment variable: ORCHESTRAI__SECTION__KEY=value
+# Precedence (highest first): ORCHESTRAI__ overrides, provider environment
+# (including ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY),
+# ORCHESTRAI__ overrides from dotenv, YAML, typed defaults.
+# Explicit config paths must exist and validate.
+# YAML: at most 1 MiB, 32 levels, 10,000 nodes; no aliases or duplicate keys.
 
 server:
   name: orchestrai
@@ -7,17 +12,12 @@ server:
   version: "0.1.0"
 
 anthropic:
-  api_key: ""          # Set via ANTHROPIC_API_KEY env var
   default_model: claude-sonnet-4-6
-  max_retries: 3
 
 openai:
-  api_key: ""          # Set via OPENAI_API_KEY env var
   default_model: gpt-4.1
-  max_retries: 3
 
 gemini:
-  api_key: ""          # Set via GEMINI_API_KEY env var
   default_model: gemini-2.5-pro-preview-05-06
 
 # Local model endpoints (Ollama, vLLM, LM Studio, etc.)
@@ -31,19 +31,15 @@ local_providers: []
 
 orchestrator:
   timeout_budget_sec: 300        # 5 minutes max per task
-  max_parallel_drafts: 3         # max parallel CODER calls in parallel_draft mode
+  max_parallel_agents: 3         # max parallel agents
   default_mode: planner_coder_reviewer
 
 policy:
-  # privacy_level: public | internal | private | secret
-  default_privacy_level: internal
-  # cost_tier: free | low | medium | high | very_high
-  default_cost_tier: high
+  # privacy_level: public | internal | confidential | secret
+  privacy_level: public
   # Provider allowlist/denylist (empty = no restriction)
   allowed_providers: []
   denied_providers: []
-  # Prefer diversity: avoid assigning same provider to multiple roles
-  prefer_provider_diversity: true
 
 observability:
   log_level: INFO
