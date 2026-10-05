@@ -115,7 +115,7 @@ def _make_registry(*providers: _MockProvider) -> CapabilityRegistry:
         registry._providers[p.name] = p
         cap = _make_cap(p.name, "mock-model")
         cap.available = True
-        registry._capabilities[f"{p.name}/mock-model"] = cap
+        registry._capabilities[(p.name, "mock-model")] = cap
     return registry
 
 

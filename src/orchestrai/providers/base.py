@@ -4,8 +4,9 @@ Abstract provider interface — every backend implements this contract.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 from orchestrai.artifacts.schemas import (
     CostTier,
@@ -14,6 +15,32 @@ from orchestrai.artifacts.schemas import (
     ProviderKind,
     RoleType,
 )
+
+
+def validate_provider_name(name: str) -> None:
+    """Provider names must be unambiguous prefixes of qualified model references."""
+    if not name or "/" in name or any(char.isspace() for char in name):
+        raise ValueError("Invalid provider name")
+
+
+def validate_provider_names(names: Iterable[str]) -> None:
+    seen: set[str] = set()
+    for name in names:
+        validate_provider_name(name)
+        if name in seen:
+            raise ValueError("Duplicate provider name")
+        seen.add(name)
+
+
+def parse_model_reference(reference: str) -> tuple[str | None, str]:
+    """Split a possible provider prefix once, preserving slashes in the model ID."""
+    provider, separator, model_id = reference.partition("/")
+    return (provider, model_id) if separator else (None, reference)
+
+
+def format_model_reference(provider: str, model_id: str) -> str:
+    """Format a validated identity without changing the advertised model ID."""
+    return f"{provider}/{model_id}"
 
 
 @dataclass

@@ -5,12 +5,15 @@ an independent model to evaluate competing implementations.
 """
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    ArtifactKind, CodePatch, JudgeVerdict, OrchestratedTask, Provenance, RoleType,
+    ArtifactKind,
+    CodePatch,
+    JudgeVerdict,
+    OrchestratedTask,
+    Provenance,
+    RoleType,
 )
 from orchestrai.observability.trace import make_artifact_id
 from orchestrai.orchestrator.modes.base_mode import ROLE_SYSTEM_PROMPTS, _extract_json
@@ -28,8 +31,15 @@ async def run_judge(
 ) -> JudgeVerdict:
     """
     Select best candidate using a judge model.
-    Falls back to heuristic scoring if judge model is unavailable.
+    Invalid explicit overrides raise before judging. Automatic selection and
+    completion failures retain the heuristic fallback.
     """
+    override_cap = None
+    if judge_model_override is not None:
+        override_cap = registry.resolve_model_reference(judge_model_override)
+        if not override_cap.available:
+            raise ValueError("Judge model override is not available")
+
     if len(candidates) < 2:
         # Nothing to judge
         winner = candidates[0] if candidates else None
@@ -43,16 +53,9 @@ async def run_judge(
         )
 
     # Try to find best judge model (planning + review strength)
-    judge_caps = registry.capabilities_for_role(RoleType.JUDGE)
+    judge_caps = [override_cap] if override_cap else registry.capabilities_for_role(RoleType.JUDGE)
     if not judge_caps:
         return _heuristic_judge(task, candidates)
-
-    # If override specified, find that model
-    if judge_model_override:
-        for cap in judge_caps:
-            if cap.model_id == judge_model_override:
-                judge_caps = [cap]
-                break
 
     judge_cap = judge_caps[0]
     provider = registry.get_provider(judge_cap.provider)
@@ -110,10 +113,17 @@ def _parse_judge_response(
             winner_idx = int(data.get("winner_index", 0))
             winner_idx = max(0, min(winner_idx, len(candidates) - 1))
             winner = candidates[winner_idx]
-            scores = {str(i): float(data.get("scores", {}).get(str(i), 0.5)) for i in range(len(candidates))}
+            scores = {
+                str(i): float(data.get("scores", {}).get(str(i), 0.5))
+                for i in range(len(candidates))
+            }
             rationale = data.get("rationale", "")
             rejected = [
-                {"candidate_id": c.id, "provider": c.provenance.provider, "concern": data.get("concerns", {}).get(str(i), "")}
+                {
+                    "candidate_id": c.id,
+                    "provider": c.provenance.provider,
+                    "concern": data.get("concerns", {}).get(str(i), ""),
+                }
                 for i, c in enumerate(candidates) if c.id != winner.id
             ]
             return JudgeVerdict(
@@ -158,7 +168,9 @@ def _heuristic_judge(task: OrchestratedTask, candidates: list[CodePatch]) -> Jud
         kind=ArtifactKind.JUDGE_VERDICT,
         provenance=Provenance(task_id=task.id),
         winner_candidate_id=winner.id,
-        winner_rationale="Selected by heuristic scoring (confidence + diff quality + provider strength).",
+        winner_rationale=(
+            "Selected by heuristic scoring (confidence + diff quality + provider strength)."
+        ),
         candidate_scores={c.id: s for s, c in scored},
         evidence_used=["heuristic scoring"],
         alternatives_rejected=rejected,

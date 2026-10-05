@@ -12,7 +12,7 @@ import structlog
 
 from orchestrai.config.settings import get_settings
 from orchestrai.providers.anthropic import AnthropicProvider
-from orchestrai.providers.base import BaseProvider
+from orchestrai.providers.base import BaseProvider, validate_provider_names
 from orchestrai.providers.gemini import GeminiProvider
 from orchestrai.providers.ollama import OllamaProvider
 from orchestrai.providers.openai import OpenAIProvider
@@ -29,9 +29,10 @@ async def discover_providers() -> list[BaseProvider]:
     """
     Probe all configured providers in parallel.
     Returns only the ones that are available.
-    Never raises — bad providers are logged and skipped.
+    Unreachable providers are skipped; invalid or duplicate identities raise.
     """
     settings = get_settings()
+    validate_provider_names(lp.name for lp in settings.local_providers)
     candidates: list[BaseProvider] = [
         AnthropicProvider(),
         OpenAIProvider(),
@@ -51,6 +52,8 @@ async def discover_providers() -> list[BaseProvider]:
             continue
         candidates.append(OpenAICompatProvider(lp))
 
+    validate_provider_names(provider.name for provider in candidates)
+
     # Probe all in parallel
     results = await asyncio.gather(
         *[_probe_one(p) for p in candidates],
@@ -58,7 +61,7 @@ async def discover_providers() -> list[BaseProvider]:
     )
 
     available: list[BaseProvider] = []
-    for provider, result in zip(candidates, results):
+    for provider, result in zip(candidates, results, strict=True):
         if isinstance(result, Exception):
             log.error(
                 "provider.discovery.error",
@@ -81,7 +84,7 @@ async def discover_providers() -> list[BaseProvider]:
 async def _probe_one(provider: BaseProvider) -> bool:
     try:
         return await asyncio.wait_for(provider.probe(), timeout=10.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("provider.probe.timeout", provider=provider.name)
         return False
     except Exception as e:

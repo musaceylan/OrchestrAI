@@ -66,7 +66,7 @@ def registry(caps):
     r = CapabilityRegistry()
     for cap in caps:
         cap.available = True
-        r._capabilities[f"{cap.provider}/{cap.model_id}"] = cap
+        r._capabilities[(cap.provider, cap.model_id)] = cap
     r._providers = {}  # no real providers needed for routing tests
     return r
 
