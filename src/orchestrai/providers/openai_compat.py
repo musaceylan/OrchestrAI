@@ -4,18 +4,23 @@ Any endpoint that speaks the OpenAI chat completions API.
 """
 from __future__ import annotations
 
-import asyncio
-
 import httpx
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    CostTier, LatencyTier, PrivacyLevel, ProviderKind, RoleType,
+    CostTier,
+    LatencyTier,
+    PrivacyLevel,
+    ProviderKind,
+    RoleType,
 )
 from orchestrai.config.settings import LocalProviderEndpoint
 from orchestrai.providers.base import (
-    BaseProvider, CompletionRequest, CompletionResponse,
-    ModelCapability, ProviderError,
+    BaseProvider,
+    CompletionRequest,
+    CompletionResponse,
+    ModelCapability,
+    ProviderError,
 )
 
 log = structlog.get_logger()
@@ -23,7 +28,7 @@ log = structlog.get_logger()
 
 class OpenAICompatProvider(BaseProvider):
     """
-    Wraps any OpenAI-compatible local endpoint.
+    Wraps any OpenAI-compatible HTTP endpoint.
     Auto-discovers available models via /v1/models.
     """
 
@@ -55,7 +60,7 @@ class OpenAICompatProvider(BaseProvider):
                         models=[m.model_id for m in self._discovered_models],
                     )
                     return True
-        except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError) as e:
+        except (TimeoutError, httpx.ConnectError, httpx.TimeoutException) as e:
             log.info(
                 "local.probe",
                 provider=self.name,
@@ -89,7 +94,9 @@ class OpenAICompatProvider(BaseProvider):
                     max_output_tokens=4096,
                     latency_tier=LatencyTier.FAST,  # local = fast
                     cost_tier=CostTier.CHEAP,        # local = free
-                    privacy_level=PrivacyLevel.SECRET,  # local = most private
+                    privacy_level=(
+                        PrivacyLevel.SECRET if self._cfg.is_loopback else PrivacyLevel.PUBLIC
+                    ),
                     supports_tool_calling=False,
                     supports_structured_output=False,
                     supports_streaming=True,

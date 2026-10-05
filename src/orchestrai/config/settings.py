@@ -4,11 +4,13 @@ Configuration — environment variables + YAML config, all typed via Pydantic.
 from __future__ import annotations
 
 import os
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +45,38 @@ class LocalProviderEndpoint(BaseSettings):
     kind: str = "openai_compat"  # openai_compat | anthropic_compat
     probe_timeout: float = 5.0
     enabled: bool = True
+
+    @property
+    def is_loopback(self) -> bool:
+        """Whether this HTTP endpoint is on the current machine's loopback interface."""
+        # Reject characters that URL parsers may silently strip or interpret differently.
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in self.base_url):
+            return False
+        if "\\" in self.base_url:
+            return False
+        try:
+            url = urlsplit(self.base_url)
+            hostname = url.hostname
+            # Parsing alone does not validate malformed or out-of-range ports.
+            _ = url.port
+        except ValueError:
+            return False
+        if url.scheme not in {"http", "https"} or not hostname:
+            return False
+        hostname = hostname.removesuffix(".")
+        if hostname == "localhost" or hostname.endswith(".localhost"):
+            return len(hostname) <= 253 and all(
+                0 < len(label) <= 63
+                and label.isascii()
+                and label.replace("-", "").isalnum()
+                and not label.startswith("-")
+                and not label.endswith("-")
+                for label in hostname.split(".")
+            )
+        try:
+            return ip_address(hostname).is_loopback
+        except ValueError:
+            return False
 
 
 class OrchestratorConfig(BaseSettings):
@@ -103,14 +137,14 @@ class Settings(BaseSettings):
     server: ServerConfig = Field(default_factory=ServerConfig)
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "Settings":
+    def from_yaml(cls, path: str | Path) -> Settings:
         with open(path) as f:
             data: dict[str, Any] = yaml.safe_load(f) or {}
         # env vars override YAML
         return cls(**data)
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls) -> Settings:
         """Load settings: YAML file if present, then env overrides."""
         import logging
         yaml_path = Path(os.environ.get("ORCHESTRAI_CONFIG", "config/default.yaml"))

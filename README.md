@@ -135,6 +135,11 @@ public       → all providers allowed
 
 Set via `user_preferences: {privacy_level: "secret"}` in `submit_task`.
 
+`local_only` means machine-loopback only: `localhost`, names beneath `.localhost`,
+IPv4 `127.0.0.0/8`, and IPv6 `::1`. LAN/private-network and remote OpenAI-compatible
+endpoints are classified as `public` and remain available only when the selected
+privacy policy permits public routing.
+
 ---
 
 ## Local Models (Privacy-First)
