@@ -5,15 +5,18 @@ Converts a raw user request into a typed TaskBrief artifact.
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Any
 
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    ArtifactKind, Provenance, RepoSummary, TaskBrief, TaskType,
+    ArtifactKind,
+    Provenance,
+    RepoSummary,
+    TaskBrief,
+    TaskType,
 )
 from orchestrai.observability.trace import make_artifact_id
+from orchestrai.policies.paths import MAX_PACKAGE_METADATA_BYTES, PathPolicy, PathPolicyError
 
 log = structlog.get_logger()
 
@@ -82,31 +85,30 @@ def classify_task(request: str) -> TaskType:
 
 def scan_repo(root: str) -> RepoSummary:
     """Quick static scan of the repo to build context."""
-    path = Path(root)
-    if not path.exists():
-        return RepoSummary(
-            id=make_artifact_id(),
-            kind=ArtifactKind.REPO_SUMMARY,
-            provenance=Provenance(task_id=""),
-            summary_text=f"Repo path not found: {root}",
-        )
+    paths = PathPolicy.current()
+    path = paths.repository(root)
+    files = {entry.relative_to(path).as_posix() for entry in paths.iter_files(path)}
 
     language = "unknown"
     frameworks: list[str] = []
     test_framework: str | None = None
     lint_tools: list[str] = []
     key_files: list[str] = []
-    total = 0
+    total = len(files)
 
     # Language detection
-    if (path / "pyproject.toml").exists() or any(path.glob("**/*.py")):
+    if "pyproject.toml" in files or any(name.endswith(".py") for name in files):
         language = "python"
-        if (path / "pyproject.toml").exists():
+        if "pyproject.toml" in files:
             key_files.append("pyproject.toml")
-    elif (path / "package.json").exists():
+    elif "package.json" in files:
         language = "typescript/javascript"
         key_files.append("package.json")
-        pkg = (path / "package.json").read_text(errors="ignore")
+        content = paths.read_bytes("package.json", path, max_bytes=MAX_PACKAGE_METADATA_BYTES)
+        try:
+            pkg = content.decode("utf-8")
+        except UnicodeError:
+            raise PathPolicyError from None
         if "react" in pkg.lower():
             frameworks.append("react")
         if "next" in pkg.lower():
@@ -115,35 +117,28 @@ def scan_repo(root: str) -> RepoSummary:
             test_framework = "vitest"
         elif "jest" in pkg:
             test_framework = "jest"
-    elif (path / "Cargo.toml").exists():
+    elif "Cargo.toml" in files:
         language = "rust"
         key_files.append("Cargo.toml")
         test_framework = "cargo test"
-    elif (path / "go.mod").exists():
+    elif "go.mod" in files:
         language = "go"
         key_files.append("go.mod")
         test_framework = "go test"
 
     # Test framework for Python
-    if language == "python":
-        if (path / "pytest.ini").exists() or (path / "pyproject.toml").exists():
-            test_framework = "pytest"
+    if language == "python" and ("pytest.ini" in files or "pyproject.toml" in files):
+        test_framework = "pytest"
 
     # Lint tools
-    if (path / ".ruff.toml").exists() or (path / "pyproject.toml").exists():
+    if ".ruff.toml" in files or "pyproject.toml" in files:
         lint_tools.append("ruff")
-    if (path / ".eslintrc.json").exists() or (path / ".eslintrc.js").exists():
+    if ".eslintrc.json" in files or ".eslintrc.js" in files:
         lint_tools.append("eslint")
-
-    # Rough file count (don't recurse infinitely)
-    try:
-        total = sum(1 for _ in path.rglob("*") if _.is_file() and ".git" not in str(_))
-    except Exception:
-        total = 0
 
     # README
     for readme in ["README.md", "README.rst", "README"]:
-        if (path / readme).exists():
+        if readme in files:
             key_files.append(readme)
             break
 
@@ -176,6 +171,11 @@ def build_task_brief(
     target_files: list[str] | None = None,
     extra_context: str | None = None,
 ) -> TaskBrief:
+    """Build descriptive artifacts only; filesystem admission belongs to submit.
+
+    Standalone callers may supply target names without a repository. No file is
+    read and an omitted repo_root remains None.
+    """
     task_type = classify_task(request)
     context_snippets: list[str] = []
     if extra_context:

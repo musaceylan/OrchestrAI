@@ -27,7 +27,9 @@ def build_tools() -> list[Tool]:
                 "Submit a software engineering task for orchestrated multi-model execution. "
                 "Automatically routes to the best combination of models for planning, coding, "
                 "testing, and review. "
-                "Set wait=false to fire-and-forget and poll with get_task_status."
+                "Set wait=false to fire-and-forget and poll with get_task_status. "
+                "Omitting repo_root skips repository scanning and execution. "
+                "Nonempty target_files require an explicit repo_root."
             ),
             inputSchema={
                 "type": "object",

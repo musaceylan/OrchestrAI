@@ -14,13 +14,15 @@ from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 from pydantic_settings import (
     BaseSettings,
     DotEnvSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+
+from orchestrai.policies.paths import STARTUP_WORKSPACE, canonical_roots
 
 
 class ConfigSection(BaseModel):
@@ -120,6 +122,23 @@ class PolicyConfig(ConfigSection):
     max_cost_usd: float | None = Field(default=None, ge=0)
     privacy_level: Literal["public", "internal", "confidential", "secret"] = "public"
     sensitive_path_patterns: tuple[str, ...] = (".env", "secrets/", "*.pem", "*.key")
+    # Omission snapshots the startup workspace; [] explicitly denies all repositories.
+    # Relative configured roots also resolve against that snapshot, never a later cwd.
+    allowed_roots: tuple[Path, ...] = Field(
+        default_factory=lambda: (STARTUP_WORKSPACE,), validate_default=True,
+    )
+
+    @field_validator("allowed_roots", mode="before")
+    @classmethod
+    def reject_empty_roots(cls, value: Any) -> Any:
+        if isinstance(value, (tuple, list)) and any(root == "" for root in value):
+            raise ValueError("Invalid repository roots")
+        return value
+
+    @field_validator("allowed_roots")
+    @classmethod
+    def canonical_roots(cls, roots: tuple[Path, ...]) -> tuple[Path, ...]:
+        return canonical_roots(roots)
 
 
 class ObservabilityConfig(ConfigSection):

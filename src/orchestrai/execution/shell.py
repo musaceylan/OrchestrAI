@@ -5,6 +5,7 @@ All execution is sandboxed with timeouts and output capture.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import time
@@ -13,9 +14,20 @@ from pathlib import Path
 import structlog
 
 from orchestrai.artifacts.schemas import (
-    ArtifactKind, CommandOutput, LintOutput, Provenance, TestCandidate, TypeCheckOutput,
+    ArtifactKind,
+    CommandOutput,
+    LintOutput,
+    Provenance,
+    TestCandidate,
+    TypeCheckOutput,
 )
 from orchestrai.observability.trace import make_artifact_id
+from orchestrai.policies.paths import (
+    MAX_PACKAGE_METADATA_BYTES,
+    STARTUP_WORKSPACE,
+    PathPolicy,
+    PathPolicyError,
+)
 
 log = structlog.get_logger()
 
@@ -30,7 +42,9 @@ async def run_command(
     subtask_id: str | None = None,
     env: dict[str, str] | None = None,
 ) -> CommandOutput:
-    """Run a shell command, capture stdout/stderr, return structured output."""
+    """Run a command only inside the currently authorized repository boundary."""
+    paths = PathPolicy.current()
+    repository = paths.repository(STARTUP_WORKSPACE if cwd is None else cwd)
     if isinstance(cmd, str):
         cmd_list = shlex.split(cmd)
         cmd_str = cmd
@@ -43,13 +57,15 @@ async def run_command(
 
     start = time.time()
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_list,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=merged_env,
-        )
+        with paths.command_cwd(repository) as (child_cwd, descriptor):
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_list,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=child_cwd,
+                pass_fds=(descriptor,),
+                env=merged_env,
+            )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
@@ -119,10 +135,12 @@ async def run_tests(
     timeout: float = 120.0,
 ) -> TestCandidate:
     """Auto-detect test framework and run tests."""
-    detected = framework or _detect_test_framework(cwd)
+    paths = PathPolicy.current()
+    root = paths.repository(cwd)
+    detected = framework or _detect_test_framework(root, paths)
     cmd = _build_test_command(detected, test_path)
 
-    output = await run_command(cmd, cwd=cwd, timeout=timeout, task_id=task_id)
+    output = await run_command(cmd, cwd=str(root), timeout=timeout, task_id=task_id)
     return TestCandidate(
         id=make_artifact_id(),
         kind=ArtifactKind.TEST_CANDIDATE,
@@ -141,8 +159,10 @@ async def run_lint(
     timeout: float = 60.0,
 ) -> LintOutput:
     """Run available linters, return structured output."""
-    detected_tool, cmd = _detect_lint_command(cwd, files)
-    output = await run_command(cmd, cwd=cwd, timeout=timeout, task_id=task_id)
+    paths = PathPolicy.current()
+    root = paths.repository(cwd)
+    detected_tool, cmd = _detect_lint_command(root, files, paths)
+    output = await run_command(cmd, cwd=str(root), timeout=timeout, task_id=task_id)
 
     issues = _parse_lint_output(detected_tool, output.stdout + output.stderr)
     errors = sum(1 for i in issues if i.get("severity") == "error")
@@ -167,8 +187,10 @@ async def run_typecheck(
     timeout: float = 60.0,
 ) -> TypeCheckOutput:
     """Run type checker if available."""
-    tool, cmd = _detect_typecheck_command(cwd)
-    output = await run_command(cmd, cwd=cwd, timeout=timeout, task_id=task_id)
+    paths = PathPolicy.current()
+    root = paths.repository(cwd)
+    tool, cmd = _detect_typecheck_command(root, paths)
+    output = await run_command(cmd, cwd=str(root), timeout=timeout, task_id=task_id)
 
     return TypeCheckOutput(
         id=make_artifact_id(),
@@ -192,12 +214,17 @@ async def get_git_status(cwd: str, task_id: str = "") -> CommandOutput:
 
 # ── Detection helpers ─────────────────────────────────────────────────────────
 
-def _detect_test_framework(cwd: str) -> str:
-    root = Path(cwd)
-    if (root / "pytest.ini").exists() or (root / "pyproject.toml").exists():
+def _detect_test_framework(root: Path, paths: PathPolicy) -> str:
+    if paths.has_file("pytest.ini", root) or paths.has_file("pyproject.toml", root):
         return "pytest"
-    if (root / "package.json").exists():
-        pkg = (root / "package.json").read_text()
+    if paths.has_file("package.json", root):
+        content = paths.read_bytes("package.json", root, max_bytes=MAX_PACKAGE_METADATA_BYTES)
+        try:
+            pkg = content.decode("utf-8")
+            if not isinstance(json.loads(pkg), dict):
+                raise PathPolicyError
+        except (ValueError, RecursionError):
+            raise PathPolicyError from None
         if "vitest" in pkg:
             return "vitest"
         if "jest" in pkg:
@@ -205,9 +232,9 @@ def _detect_test_framework(cwd: str) -> str:
         if "mocha" in pkg:
             return "mocha"
         return "npm test"
-    if (root / "Cargo.toml").exists():
+    if paths.has_file("Cargo.toml", root):
         return "cargo test"
-    if (root / "go.mod").exists():
+    if paths.has_file("go.mod", root):
         return "go test"
     return "pytest"
 
@@ -227,32 +254,32 @@ def _build_test_command(framework: str, test_path: str | None) -> str:
     return framework
 
 
-def _detect_lint_command(cwd: str, files: list[str] | None) -> tuple[str, list[str]]:
-    root = Path(cwd)
+def _detect_lint_command(
+    root: Path, files: list[str] | None, paths: PathPolicy,
+) -> tuple[str, list[str]]:
     # Use list form to avoid argument injection — never join into a shell string
     file_args: list[str] = files if files else ["."]
     # Reject any file arg that looks like a flag to prevent option injection
     safe_file_args = [f for f in file_args if not f.startswith("-")]
     if not safe_file_args:
         safe_file_args = ["."]
-    if (root / "pyproject.toml").exists() or (root / ".ruff.toml").exists():
+    if paths.has_file("pyproject.toml", root) or paths.has_file(".ruff.toml", root):
         return "ruff", ["ruff", "check"] + safe_file_args
-    if (root / ".eslintrc.json").exists() or (root / ".eslintrc.js").exists():
+    if paths.has_file(".eslintrc.json", root) or paths.has_file(".eslintrc.js", root):
         return "eslint", ["npx", "eslint"] + safe_file_args
-    if (root / "Cargo.toml").exists():
+    if paths.has_file("Cargo.toml", root):
         return "clippy", ["cargo", "clippy", "--", "-D", "warnings"]
-    if (root / "go.mod").exists():
+    if paths.has_file("go.mod", root):
         return "golint", ["go", "vet", "./..."]
     return "ruff", ["ruff", "check"] + safe_file_args
 
 
-def _detect_typecheck_command(cwd: str) -> tuple[str, str]:
-    root = Path(cwd)
-    if (root / "tsconfig.json").exists():
+def _detect_typecheck_command(root: Path, paths: PathPolicy) -> tuple[str, str]:
+    if paths.has_file("tsconfig.json", root):
         return "tsc", "npx tsc --noEmit"
-    if (root / "pyproject.toml").exists():
+    if paths.has_file("pyproject.toml", root):
         return "mypy", "python -m mypy ."
-    if (root / "go.mod").exists():
+    if paths.has_file("go.mod", root):
         return "go build", "go build ./..."
     return "mypy", "python -m mypy ."
 

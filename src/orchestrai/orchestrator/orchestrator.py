@@ -20,6 +20,7 @@ from orchestrai.orchestrator.intake import build_task_brief, scan_repo
 from orchestrai.orchestrator.modes.impl_tester import ImplTesterMode
 from orchestrai.orchestrator.modes.parallel_draft import ParallelDraftMode
 from orchestrai.orchestrator.modes.planner_coder_reviewer import PlannerCoderReviewerMode
+from orchestrai.policies.paths import PathPolicy
 from orchestrai.registry.registry import CapabilityRegistry
 from orchestrai.registry.router import RoutingEngine
 
@@ -63,6 +64,12 @@ class Orchestrator:
     ) -> OrchestratedTask:
         """
         Main entrypoint: intake a task and orchestrate it end-to-end.
+
+        Omitted repo_root stays None: no repository scan or repository-bound
+        execution occurs. The allowed-roots startup default never infers a task
+        repository. Explicit [] in policy.allowed_roots denies all explicit roots.
+        Nonempty target_files require an explicit repository; proposed new files
+        must remain beneath its authorized directory ancestors.
 
         When wait=True (default) blocks until the task finishes and returns the
         completed OrchestratedTask.  When wait=False, fires the execution as a
@@ -150,6 +157,9 @@ class Orchestrator:
         original_context: TaskContext | None = None,
     ) -> tuple[OrchestratedTask, ArtifactStore, Tracer, Any]:
         """Set up all state for a task without running it. Returns (task, store, tracer, executor)."""
+        canonical_repo, canonical_targets = PathPolicy.current().task_paths(repo_root, target_files)
+        repo_root = str(canonical_repo) if canonical_repo is not None else None
+        target_files = [str(target) for target in canonical_targets]
         context = TaskContext.resolve(
             self._settings.policy, user_preferences, original_context,
             registry_supplier=lambda: self._registry,
