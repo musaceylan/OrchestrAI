@@ -14,6 +14,7 @@ from orchestrai.observability.metrics import tool_calls_total
 from orchestrai.orchestrator.judge import run_judge
 from orchestrai.orchestrator.orchestrator import Orchestrator
 from orchestrai.registry.registry import CapabilityRegistry
+from orchestrai.server.runtime import AccessDenied, ActiveTaskLimit, require_scope
 
 log = structlog.get_logger()
 
@@ -360,7 +361,20 @@ async def handle_tool(
         return {"error": f"Unknown tool: {name}"}
     _t0 = time.time()
     try:
+        required = "tasks:read"
+        if name in {"submit_task", "cancel_task", "rerun_with_policy", "compare_candidates"}:
+            required = "tasks:write"
+        elif name in {"reload_config", "probe_providers"}:
+            required = "admin"
+        require_scope(required)
+        if name in {
+            "inspect_plan", "inspect_agents", "inspect_artifacts", "inspect_trace",
+            "get_task_status", "get_task_result", "get_task_events", "cancel_task",
+            "rerun_with_policy", "compare_candidates",
+        }:
+            orchestrator.authorize_task(arguments["task_id"])
         result = await handler(arguments, orchestrator, registry)
+        require_scope(required)
         _outcome = "error" if isinstance(result, dict) and "error" in result else "success"
         log.info(
             "audit.tool_call",
@@ -371,6 +385,10 @@ async def handle_tool(
         )
         tool_calls_total.labels(tool=name, outcome=_outcome).inc()
         return result
+    except AccessDenied:
+        return {"error": "Access denied"}
+    except ActiveTaskLimit:
+        return {"error": "Active task limit reached"}
     except Exception as e:
         log.exception("tool.error", tool=name, error=str(e))
         log.info(
@@ -599,12 +617,16 @@ async def _compare_candidates(
     if registry is None:
         return {"error": "Registry not initialized"}
 
-    verdict = await run_judge(
-        task=task,
-        candidates=patches,
-        registry=registry,
-        judge_model_override=args.get("judge_model"),
-    )
+    release = orchestrator.task_limits.acquire()
+    try:
+        verdict = await run_judge(
+            task=task,
+            candidates=patches,
+            registry=registry,
+            judge_model_override=args.get("judge_model"),
+        )
+    finally:
+        release()
     return {
         "task_id": task_id,
         "candidates": len(patches),
@@ -670,6 +692,7 @@ async def _probe_providers(
     orchestrator: Orchestrator,
     registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
+    require_scope("admin")
     from orchestrai.config.settings import candidate_settings, get_settings
     from orchestrai.providers.discovery import discover_providers
     from orchestrai.registry.registry import CapabilityRegistry as CR
@@ -679,6 +702,7 @@ async def _probe_providers(
     with candidate_settings(source_settings):
         providers = await discover_providers()
         new_registry = await CR.build(providers)
+    require_scope("admin")
     published = (
         orchestrator._settings is source_settings
         and orchestrator._registry is source_registry
@@ -790,6 +814,7 @@ async def _reload_config(
     orchestrator: Orchestrator,
     registry: CapabilityRegistry | None,
 ) -> dict[str, Any]:
+    require_scope("admin")
     from orchestrai.config.settings import (
         candidate_settings,
         get_settings,
@@ -820,6 +845,7 @@ async def _reload_config(
 
     # No awaits in publication: other asyncio requests see the old runtime
     # throughout preparation, and the complete new runtime after publication.
+    require_scope("admin")
     published = (
         orchestrator._settings is source_settings
         and orchestrator._registry is source_registry

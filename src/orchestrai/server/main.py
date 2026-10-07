@@ -30,13 +30,16 @@ from orchestrai.observability.trace import configure_logging
 from orchestrai.orchestrator.orchestrator import Orchestrator
 from orchestrai.providers.discovery import discover_providers
 from orchestrai.registry.registry import CapabilityRegistry
+from orchestrai.server.mcp_compat import register
 from orchestrai.server.prompts import BUILTIN_PROMPTS, render_prompt
+from orchestrai.server.runtime import SSEConnectionLimit, SSEConnectionLimits, require_scope
 from orchestrai.server.tools import build_tools, handle_tool
 
 log = structlog.get_logger()
 
 _orchestrator: Orchestrator | None = None
 _registry: CapabilityRegistry | None = None
+_initialization_lock = asyncio.Lock()
 
 
 def publish_runtime(
@@ -58,9 +61,11 @@ def publish_runtime(
 async def get_orchestrator() -> Orchestrator:
     global _orchestrator, _registry
     if _orchestrator is None:
-        providers = await discover_providers()
-        _registry = await CapabilityRegistry.build(providers)
-        _orchestrator = Orchestrator(_registry)
+        async with _initialization_lock:
+            if _orchestrator is None:
+                providers = await discover_providers()
+                _registry = await CapabilityRegistry.build(providers)
+                _orchestrator = Orchestrator(_registry)
     return _orchestrator
 
 
@@ -70,17 +75,17 @@ def _build_mcp_server() -> Server:
     server: Server = Server(settings.server.name)
     tools = build_tools()
 
-    @server.list_tools()
+    @register(server, "list_tools")
     async def list_tools() -> list[Tool]:
         return tools
 
-    @server.call_tool()
+    @register(server, "call_tool")
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         orch = await get_orchestrator()
         result = await handle_tool(name, arguments, orch, _registry)
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-    @server.list_resources()
+    @register(server, "list_resources")
     async def list_resources() -> list[Resource]:
         return [
             Resource(
@@ -103,9 +108,11 @@ def _build_mcp_server() -> Server:
             ),
         ]
 
-    @server.read_resource()
+    @register(server, "read_resource")
     async def read_resource(uri: str) -> str:
+        require_scope("tasks:read")
         orch = await get_orchestrator()
+        require_scope("tasks:read")
         if uri == "orchestrai://registry":
             return json.dumps(_registry.to_dict() if _registry else {}, indent=2)
         if uri == "orchestrai://status":
@@ -121,7 +128,7 @@ def _build_mcp_server() -> Server:
             return json.dumps(orch.get_cost_summary(), indent=2, default=str)
         return json.dumps({"error": f"Unknown resource: {uri}"})
 
-    @server.list_prompts()
+    @register(server, "list_prompts")
     async def list_prompts() -> list[Prompt]:
         return [
             Prompt(
@@ -139,7 +146,7 @@ def _build_mcp_server() -> Server:
             for p in BUILTIN_PROMPTS
         ]
 
-    @server.get_prompt()
+    @register(server, "get_prompt")
     async def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
         rendered = render_prompt(name, arguments or {})
         return GetPromptResult(
@@ -176,12 +183,16 @@ async def serve_sse(host: str, port: int) -> None:
       GET  http://host:port/sse          — establishes the SSE stream
       POST http://host:port/messages/    — sends tool calls / requests
     """
+    from orchestrai.server.security import SecurityMiddleware, validate_bind
+
+    validate_bind(host)
     try:
         import uvicorn
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
-        from starlette.requests import Request
+        from starlette.responses import Response
         from starlette.routing import Mount, Route
+        from starlette.types import Receive, Scope, Send
     except ImportError as e:
         raise SystemExit(
             f"HTTP transport requires extra dependencies: {e}\n"
@@ -196,22 +207,33 @@ async def serve_sse(host: str, port: int) -> None:
 
     server = _build_mcp_server()
     sse_transport = SseServerTransport("/messages/")
+    connection_limits = SSEConnectionLimits()
 
-    async def handle_sse(request: Request) -> Any:
-        async with sse_transport.connect_sse(
-            request.scope, request.receive, request._send  # type: ignore[attr-defined]
-        ) as streams:
-            await server.run(*streams, server.create_initialization_options())
+    class SSEConnection:
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            try:
+                release = connection_limits.acquire()
+            except SSEConnectionLimit:
+                await Response("Too many SSE connections", 429)(scope, receive, send)
+                return
+            try:
+                async with sse_transport.connect_sse(scope, receive, send) as streams:
+                    await server.run(*streams, server.create_initialization_options())
+            finally:
+                release()
 
     starlette_app = Starlette(
         routes=[
-            Route("/sse", endpoint=handle_sse),
+            Route("/sse", endpoint=SSEConnection(), methods=["GET"]),
             Mount("/messages/", app=sse_transport.handle_post_message),
         ]
     )
 
     log.info("orchestrai.starting", transport="sse", host=host, port=port)
-    config = uvicorn.Config(starlette_app, host=host, port=port, log_level="warning")
+    config = uvicorn.Config(
+        SecurityMiddleware(starlette_app, port), host=host, port=port, log_level="warning",
+        proxy_headers=False,
+    )
     uv_server = uvicorn.Server(config)
     await uv_server.serve()
 

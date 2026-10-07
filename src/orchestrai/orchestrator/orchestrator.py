@@ -23,6 +23,13 @@ from orchestrai.orchestrator.modes.planner_coder_reviewer import PlannerCoderRev
 from orchestrai.policies.paths import PathPolicy
 from orchestrai.registry.registry import CapabilityRegistry
 from orchestrai.registry.router import RoutingEngine
+from orchestrai.server.runtime import (
+    AccessDenied,
+    Principal,
+    TaskLimits,
+    current_principal,
+    require_scope,
+)
 
 log = structlog.get_logger()
 
@@ -50,6 +57,19 @@ class Orchestrator:
         # Per-task event log: task_id → list of {event, timestamp, ...}
         self._events: dict[str, list[dict[str, Any]]] = {}
         self._stores: dict[str, ArtifactStore] = {}
+        self._owners: dict[str, Principal | None] = {}
+        self.task_limits = TaskLimits()
+
+    def can_access_task(self, task_id: str) -> bool:
+        principal = current_principal()
+        if principal is None:
+            return True
+        owner = self._owners.get(task_id)
+        return owner is not None and owner.name == principal.name
+
+    def authorize_task(self, task_id: str) -> None:
+        if not self.can_access_task(task_id):
+            raise AccessDenied
 
     async def submit(
         self,
@@ -75,26 +95,36 @@ class Orchestrator:
         completed OrchestratedTask.  When wait=False, fires the execution as a
         background asyncio task and returns immediately with status="running".
         """
-        task, store, tracer, executor = await self._prepare(
-            request=request,
-            repo_root=repo_root,
-            target_files=target_files,
-            mode=mode,
-            user_preferences=user_preferences,
-            original_context=_original_context,
-        )
+        require_scope("tasks:write")
+        release = self.task_limits.acquire()
+        try:
+            task, store, tracer, executor = await self._prepare(
+                request=request,
+                repo_root=repo_root,
+                target_files=target_files,
+                mode=mode,
+                user_preferences=user_preferences,
+                original_context=_original_context,
+            )
+        except BaseException:
+            release()
+            raise
         self._events[task.id] = [
             {"event": "task_started", "ts": time.time(), "mode": task.mode,
              "task_type": task.brief.task_type.value}
         ]
 
         if wait:
-            await self._run(task, store, tracer, executor)
+            try:
+                await self._run(task, store, tracer, executor)
+            finally:
+                release()
         else:
             bg = asyncio.create_task(self._run(task, store, tracer, executor))
             self._bg_tasks[task.id] = bg
             # Remove from bg_tasks when done; errors are handled inside _run
             bg.add_done_callback(lambda _: self._bg_tasks.pop(task.id, None))
+            bg.add_done_callback(lambda _: release())
 
         return task
 
@@ -106,6 +136,8 @@ class Orchestrator:
 
     def get_events(self, task_id: str, offset: int = 0) -> list[dict[str, Any]]:
         """Return task events from `offset` index onward (for incremental polling)."""
+        require_scope("tasks:read")
+        self.authorize_task(task_id)
         events = self._events.get(task_id, [])
         return events[offset:]
 
@@ -117,6 +149,8 @@ class Orchestrator:
         False if the task is not in the background queue (already finished or
         was a synchronous submit).
         """
+        require_scope("tasks:write")
+        self.authorize_task(task_id)
         bg = self._bg_tasks.get(task_id)
         if bg is None or bg.done():
             return False
@@ -135,6 +169,8 @@ class Orchestrator:
     async def rerun(
         self, task_id: str, preferences: dict[str, Any],
     ) -> OrchestratedTask:
+        require_scope("tasks:write")
+        self.authorize_task(task_id)
         original = self._active.get(task_id) or self._finished.get(task_id)
         if original is None or original._context is None:
             raise ValueError("Original task policy is unavailable")
@@ -158,6 +194,9 @@ class Orchestrator:
     ) -> tuple[OrchestratedTask, ArtifactStore, Tracer, Any]:
         """Set up all state for a task without running it. Returns (task, store, tracer, executor)."""
         canonical_repo, canonical_targets = PathPolicy.current().task_paths(repo_root, target_files)
+        principal = current_principal()
+        if principal is not None:
+            PathPolicy(principal.roots).task_paths(repo_root, target_files)
         repo_root = str(canonical_repo) if canonical_repo is not None else None
         target_files = [str(target) for target in canonical_targets]
         context = TaskContext.resolve(
@@ -212,8 +251,6 @@ class Orchestrator:
             status="running",
         )
         task._context = context
-        self._active[task_id] = task
-        self._stores[task_id] = store
 
         tracer.task_started(mode=mode, task_type=brief.task_type.value)
         tracer.routing_decided(assignments=routing.assignments, rationale=routing.rationale)
@@ -225,6 +262,12 @@ class Orchestrator:
             store=store,
             tracer=tracer,
         )
+
+        # Publish only after all fallible preparation has succeeded.
+        owner = current_principal()
+        self._owners[task_id] = owner
+        self._active[task_id] = task
+        self._stores[task_id] = store
 
         return task, store, tracer, executor
 
@@ -294,6 +337,7 @@ class Orchestrator:
                 del self._finished[oldest]
                 self._events.pop(oldest, None)
                 self._stores.pop(oldest, None)
+                self._owners.pop(oldest, None)
 
         _duration = time.time() - start
         tasks_total.labels(status=task.status, mode=task.mode).inc()
@@ -306,6 +350,7 @@ class Orchestrator:
         )
 
     def get_active_tasks(self) -> list[dict[str, Any]]:
+        require_scope("tasks:read")
         return [
             {
                 "id": t.id,
@@ -315,14 +360,19 @@ class Orchestrator:
                 "subtasks": len(t.subtasks),
             }
             for t in self._active.values()
+            if self.can_access_task(t.id)
         ]
 
     def get_cost_summary(self) -> dict[str, Any]:
         """Return per-task and session-total cost data."""
-        finished = list(self._finished.values())
-        active = list(self._active.values())
+        require_scope("tasks:read")
+        finished = [t for t in self._finished.values() if self.can_access_task(t.id)]
+        active = [t for t in self._active.values() if self.can_access_task(t.id)]
         session_cost = sum(t.cost_usd for t in finished) + sum(t.cost_usd for t in active)
-        session_tokens = sum(t.tokens_used for t in finished) + sum(t.tokens_used for t in active)
+        session_tokens = sum(
+            sum(t.tokens_used.values()) if isinstance(t.tokens_used, dict) else t.tokens_used
+            for t in (*finished, *active)
+        )
         per_task = [
             {
                 "task_id": t.id,
@@ -355,7 +405,8 @@ class Orchestrator:
 
     def get_recent_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recently finished tasks, newest first."""
-        finished = list(self._finished.values())
+        require_scope("tasks:read")
+        finished = [t for t in self._finished.values() if self.can_access_task(t.id)]
         finished.sort(key=lambda t: t.finished_at or 0, reverse=True)
         return [
             {

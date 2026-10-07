@@ -5,6 +5,7 @@ Configuration — environment variables + YAML config, all typed via Pydantic.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -14,7 +15,15 @@ from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SecretStr,
+    field_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     DotEnvSettingsSource,
@@ -149,12 +158,115 @@ class ObservabilityConfig(ConfigSection):
     metrics_enabled: bool = True
 
 
+class SSETokenConfig(ConfigSection):
+    token: SecretStr = Field(repr=False)
+    principal: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    scopes: tuple[Literal["tasks:read", "tasks:write", "admin"], ...] = ()
+    allowed_roots: tuple[Path, ...] = Field(default=(), max_length=64)
+
+    @field_validator("token")
+    @classmethod
+    def bounded_token(cls, value: SecretStr) -> SecretStr:
+        if re.fullmatch(r"[A-Za-z0-9_-]{32,256}", value.get_secret_value()) is None:
+            raise ValueError("Invalid SSE token")
+        return value
+
+    @field_validator("allowed_roots", mode="before")
+    @classmethod
+    def reject_empty_roots(cls, value: Any) -> Any:
+        return PolicyConfig.reject_empty_roots(value)
+
+    @field_validator("allowed_roots")
+    @classmethod
+    def canonical_roots(cls, roots: tuple[Path, ...]) -> tuple[Path, ...]:
+        return canonical_roots(roots)
+
+
+class SSEConfig(ConfigSection):
+    auth_required: bool = False
+    tokens: tuple[SSETokenConfig, ...] = Field(default=(), max_length=128, repr=False)
+    max_request_bytes: int = Field(default=1024 * 1024, ge=1, le=4 * 1024 * 1024)
+    requests_per_minute: int = Field(default=120, ge=1, le=10000)
+    max_active_tasks: int = Field(default=32, ge=1, le=256)
+    max_active_tasks_per_principal: int = Field(default=4, ge=1, le=256)
+    max_sse_connections: int = Field(default=32, ge=1, le=256, strict=True)
+    max_sse_connections_per_principal: int = Field(default=4, ge=1, le=256, strict=True)
+    allow_remote: bool = False
+    tls_terminated: bool = False
+    trusted_proxies: tuple[str, ...] = Field(default=(), max_length=32)
+    allowed_hosts: tuple[str, ...] = Field(default=(), max_length=32)
+    allowed_origins: tuple[str, ...] = Field(default=(), max_length=32)
+
+    @field_validator("tokens")
+    @classmethod
+    def unique_tokens(cls, grants: tuple[SSETokenConfig, ...]) -> tuple[SSETokenConfig, ...]:
+        values = [grant.token.get_secret_value() for grant in grants]
+        if len(set(values)) != len(values):
+            raise ValueError("Duplicate SSE credentials")
+        return grants
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def literal_proxies(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            if any(str(ip_address(value)) != value or "%" in value for value in values):
+                raise ValueError
+        except ValueError:
+            raise ValueError("Invalid SSE proxy address") from None
+        return values
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def exact_hosts(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            _validate_sse_authority(value)
+        return values
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def exact_origins(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            for value in values:
+                url = urlsplit(value)
+                if url.scheme not in {"http", "https"} or value != f"{url.scheme}://{url.netloc}":
+                    raise ValueError
+                _validate_sse_authority(url.netloc)
+        except ValueError:
+            raise ValueError("Invalid SSE origin") from None
+        return values
+
+
+def _validate_sse_authority(value: str) -> None:
+    try:
+        url = urlsplit("http://" + value)
+        host = url.hostname or ""
+        if ":" in host:
+            ip_address(host)
+            authority = f"[{host}]"
+        else:
+            if len(host) > 253 or any(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part) is None
+                for part in host.split(".")
+            ):
+                raise ValueError
+            authority = host
+        if url.port is not None:
+            if url.port == 0:
+                raise ValueError
+            authority += f":{url.port}"
+        if value != authority:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Invalid SSE host") from None
+
+
 class ServerConfig(ConfigSection):
     transport: Literal["stdio", "sse"] = "stdio"  # stdio | sse
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
     name: str = "orchestrai"
     version: str = "0.1.0"
+    sse: SSEConfig = Field(default_factory=SSEConfig)
 
 
 class SettingsValues(ConfigSection):

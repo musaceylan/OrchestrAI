@@ -20,7 +20,9 @@ classifiers = [
 
 dependencies = [
     # MCP
-    "mcp>=1.3.0",
+    "mcp>=2.1.0",
+    # Tool input validation; matches the MCP SDK's supported lower bound.
+    "jsonschema>=4.20.0",
     # Async HTTP
     "httpx>=0.27.0",
     "aiohttp>=3.9.0",
